@@ -1,0 +1,6 @@
+.pio/
+.vscode/
+include/secrets.h
+__pycache__/
+*.pyc
+tools/.dismissed.json
