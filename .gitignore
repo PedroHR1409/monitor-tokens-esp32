@@ -1,5 +1,6 @@
 .pio/
 .vscode/
+.claude/
 include/secrets.h
 __pycache__/
 *.pyc
