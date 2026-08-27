@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from session_hook import hook_health, load_event_store
 from session_meta import codex_meta, read_git_branch, context_usage
 from usage_tracker import collect as collect_usage, session_tokens
 from quota import collect as collect_quota
+from protocol_v2 import build_snapshot_v2
 
 MAX_SESSIONS = 6
 
@@ -446,9 +448,10 @@ def hook_warnings(sessions: list, health: dict) -> list:
             if not health.get(tool) and any(s["tool"] == tool for s in sessions)]
 
 
-def build_payload(claude_dir: Path, codex_index: Path, max_sessions: int,
-                  tz: timezone, now: datetime | None = None,
-                  hidden: set | None = None, pinned: set | None = None) -> dict:
+def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
+                     tz: timezone, now: datetime | None = None,
+                     hidden: set | None = None, pinned: set | None = None) -> dict:
+    """Payload legÃ­vel pelo firmware v1 durante a migraÃ§Ã£o do protocolo."""
     now = now or datetime.now(timezone.utc)
     dismissed = load_dismissed()
     hidden = hidden or set()
@@ -504,6 +507,29 @@ def build_payload(claude_dir: Path, codex_index: Path, max_sessions: int,
     }
 
 
+# Compatibilidade para integraÃ§Ãµes Python existentes; o daemon usa os builders versionados.
+build_payload = build_payload_v1
+
+
+def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
+                     tz: timezone, *, node_id: str, device_id: str,
+                     daemon_instance_id: str, sequence: int,
+                     now: datetime | None = None, hidden: set | None = None,
+                     pinned: set | None = None) -> dict:
+    """Projeta os dados normalizados atuais no envelope estÃ¡vel do protocolo v2."""
+    generated = now or datetime.now(timezone.utc)
+    v1 = build_payload_v1(claude_dir, codex_index, max_sessions, tz, generated,
+                          hidden=hidden, pinned=pinned)
+    legacy_stats = v1["stats"]
+    usage = {name: value for name, value in legacy_stats.items() if name != "quota"}
+    return build_snapshot_v2(
+        sessions=v1["sessions"], catalog=v1["catalog"], usage=usage,
+        quota=legacy_stats["quota"], health=hook_health(), node_id=node_id,
+        device_id=device_id, daemon_instance_id=daemon_instance_id,
+        sequence=sequence, now=generated,
+    )
+
+
 def post_sessions(url: str, payload: dict, timeout: float = 5.0) -> bool:
     body = json.dumps(payload).encode("utf-8")
     req = authenticated_request(url, data=body, method="POST",
@@ -524,7 +550,7 @@ def format_summary(payload: dict) -> str:
     return ", ".join(parts) or "(nenhuma sessao)"
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="monitor-ai.local")
@@ -535,13 +561,23 @@ def main() -> None:
     ap.add_argument("--max-sessions", type=int, default=MAX_SESSIONS)
     ap.add_argument("--tz-offset", type=float, default=-3.0,
                     help="fuso para o corte do dia (padrao -3 = horario de Brasilia)")
+    ap.add_argument("--protocol", type=int, choices=(1, 2), default=2,
+                    help="versao do payload (padrao: 2; use 1 para firmware legado)")
     ap.add_argument("--once", action="store_true")
-    args = ap.parse_args()
+    return ap.parse_args(argv)
+
+
+def main() -> None:
+    args = parse_args()
 
     base = "http://{}:{}".format(args.host, args.port)
-    url = base + "/sessions"
+    url = base + ("/api/v2/snapshot" if args.protocol == 2 else "/sessions")
     tz = timezone(timedelta(hours=args.tz_offset))
     claude_dir, codex_index = Path(args.claude_dir), Path(args.codex_index)
+    node_id = os.environ.get("MONITOR_NODE_ID", "").strip() or os.environ.get("COMPUTERNAME", "monitor")
+    device_id = os.environ.get("MONITOR_DEVICE_ID", "").strip() or args.host
+    daemon_instance_id = "{}-{}".format(node_id, uuid.uuid4().hex)
+    sequence = 0
 
     print("[daemon] Monitor.AI -> {} a cada {}s (dia em UTC{:+g}, board = ultimas {:.0f}h)"
           .format(url, args.interval, args.tz_offset, BOARD_WINDOW_S / 3600))
@@ -551,11 +587,20 @@ def main() -> None:
     avisos_anteriores: list = []
 
     while True:
-        payload = build_payload(claude_dir, codex_index, args.max_sessions, tz,
-                                hidden=fetch_id_list(base, "/hidden", "hidden"),
-                                pinned=fetch_id_list(base, "/pinned", "pinned"))
+        hidden = fetch_id_list(base, "/hidden", "hidden")
+        pinned = fetch_id_list(base, "/pinned", "pinned")
+        if args.protocol == 1:
+            payload = build_payload_v1(claude_dir, codex_index, args.max_sessions, tz,
+                                       hidden=hidden, pinned=pinned)
+            st = payload["stats"]
+        else:
+            sequence += 1
+            payload = build_payload_v2(
+                claude_dir, codex_index, args.max_sessions, tz, node_id=node_id,
+                device_id=device_id, daemon_instance_id=daemon_instance_id,
+                sequence=sequence, hidden=hidden, pinned=pinned)
+            st = payload["stats"]["usage"]
         ok = post_sessions(url, payload)
-        st = payload["stats"]
 
         # So imprime quando o diagnostico MUDA: repetir o mesmo aviso a cada 5s vira
         # ruido e o operador para de ler justamente a linha que importa.
