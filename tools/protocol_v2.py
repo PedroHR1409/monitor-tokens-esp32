@@ -138,7 +138,7 @@ def _is_secret_field_name(key: object) -> bool:
         return True
     if "secret" in compact or "password" in compact:
         return True
-    if compact in {"apikey", "authorization", "privatekey", "auth", "bearer"}:
+    if "apikey" in compact or compact in {"authorization", "privatekey", "auth", "bearer"}:
         return True
     return "token" in words or compact.endswith("token")
 

@@ -134,7 +134,8 @@ class SnapshotEnvelopeTests(unittest.TestCase):
 
     def test_secret_transport_keys_are_rejected_recursively(self):
         """A secret-shaped key at any nesting level must never enter a device snapshot."""
-        for key in ("token", "access_token", "x-monitor-token", "refreshToken"):
+        for key in ("token", "access_token", "x-monitor-token", "refreshToken",
+                    "x-api-key", "X-API-Key"):
             with self.subTest(key=key):
                 with self.assertRaises(ValueError):
                     build_snapshot(health={"nested": {key: "not-for-device"}})
