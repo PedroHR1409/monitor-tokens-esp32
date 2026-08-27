@@ -80,6 +80,21 @@ class SnapshotEnvelopeTests(unittest.TestCase):
         self.assertEqual({"value": None, "quality": "unknown", "unit": "percent"}, unknown)
         self.assertEqual({"value": 42, "quality": "measured", "unit": "tokens"}, measured)
 
+    def test_unknown_metric_rejects_a_numeric_value(self):
+        """A numeric unknown value would reintroduce a fabricated metric into the UI."""
+        with self.assertRaises(ValueError):
+            metric_value(42, quality=MetricQuality.UNKNOWN, unit="percent")
+
+    def test_claude_legacy_context_percentage_becomes_unknown(self):
+        """Forwarding legacy Claude ctxPct would pretend its unproven denominator is known."""
+        snapshot = build_snapshot(sessions=[{
+            "id": "claude-session", "tool": "claude", "state": "work", "ctxPct": 99,
+        }])
+        session = snapshot["sessions"][0]
+        self.assertIsNone(session["ctxPct"])
+        self.assertEqual({"value": None, "quality": "unknown", "unit": "percent"},
+                         session["context"])
+
     def test_sessions_receive_composite_keys(self):
         """Using only session IDs would collide for sessions from separate nodes/providers."""
         snapshot = build_snapshot()
@@ -102,6 +117,32 @@ class SnapshotEnvelopeTests(unittest.TestCase):
         snapshot["schema_version"] = 3
         with self.assertRaises(UnsupportedProtocolVersion):
             validate_snapshot_v2(snapshot)
+
+    def test_duplicate_catalog_composite_identity_is_rejected(self):
+        """A duplicated catalog identity would make an action target ambiguous."""
+        snapshot = build_snapshot()
+        snapshot["catalog"].append(dict(snapshot["catalog"][0]))
+        with self.assertRaises(ValueError):
+            validate_snapshot_v2(snapshot)
+
+    def test_malformed_catalog_composite_identity_is_rejected(self):
+        """A catalog key that does not match its node/provider/session must not be accepted."""
+        snapshot = build_snapshot()
+        snapshot["catalog"][0]["session_key"] = "not-a-composite-key"
+        with self.assertRaises(ValueError):
+            validate_snapshot_v2(snapshot)
+
+    def test_secret_transport_keys_are_rejected_recursively(self):
+        """A secret-shaped key at any nesting level must never enter a device snapshot."""
+        for key in ("token", "access_token", "x-monitor-token", "refreshToken"):
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    build_snapshot(health={"nested": {key: "not-for-device"}})
+
+    def test_token_window_count_is_not_treated_as_a_secret(self):
+        """Rejecting the public token-window duration would make ordinary v2 snapshots fail."""
+        snapshot = build_snapshot(usage={"token_window_h": 12})
+        self.assertEqual(12, snapshot["stats"]["usage"]["token_window_h"])
 
 
 class SessionDaemonProtocolSelectionTests(unittest.TestCase):

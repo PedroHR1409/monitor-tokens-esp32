@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from math import isfinite
+import re
 from typing import Any, Mapping
 
 
@@ -15,9 +16,6 @@ DEFAULT_CAPABILITIES = ("metric_quality", "composite_session_keys")
 MAX_SEQUENCE = (1 << 63) - 1
 _METRIC_QUALITIES = frozenset({
     "official", "measured", "estimated", "configured", "historical", "unknown",
-})
-_SECRET_FIELD_NAMES = frozenset({
-    "password", "secret", "api_key", "authorization", "monitor_api_token",
 })
 
 
@@ -92,9 +90,11 @@ def metric_value(value: int | float | None, *, quality: MetricQuality | str,
     if quality_value not in _METRIC_QUALITIES:
         raise ValueError("metric quality is unsupported")
     _string(unit, "metric unit")
-    if value is None:
-        if quality_value != MetricQuality.UNKNOWN.value:
-            raise ValueError("only an unknown metric may omit its value")
+    if quality_value == MetricQuality.UNKNOWN.value:
+        if value is not None:
+            raise ValueError("an unknown metric cannot contain a numeric value")
+    elif value is None:
+        raise ValueError("only an unknown metric may omit its value")
     else:
         _number(value, "metric value", maximum=100 if unit == "percent" else None)
     return {"value": value, "quality": quality_value, "unit": unit}
@@ -114,7 +114,33 @@ def _session_identity(entry: Mapping[str, Any], node_id: str) -> dict[str, Any]:
         "session_id": session_id,
         "session_key": f"{node_id}:{provider}:{session_id}",
     })
+    # O campo legado ctxPct nao traz o teto nem a proveniencia. Em especial, o Claude
+    # inventava 1M antes de aprender um limite; v2 nunca deve transformar isso em fato.
+    context = session.get("context")
+    if isinstance(context, Mapping) and {"value", "quality", "unit"}.issubset(context):
+        session["context"] = metric_value(context["value"], quality=context["quality"],
+                                          unit=context["unit"])
+    else:
+        session["context"] = metric_value(None, quality=MetricQuality.UNKNOWN,
+                                          unit="percent")
+    session["ctxPct"] = None
     return session
+
+
+def _is_secret_field_name(key: object) -> bool:
+    raw = str(key)
+    separated = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", raw).lower()
+    words = re.findall(r"[a-z0-9]+", separated)
+    compact = "".join(words)
+    if words == ["token", "window", "h"]:
+        return False
+    if any(word in {"secret", "password", "credential"} for word in words):
+        return True
+    if "secret" in compact or "password" in compact:
+        return True
+    if compact in {"apikey", "authorization", "privatekey", "auth", "bearer"}:
+        return True
+    return "token" in words or compact.endswith("token")
 
 
 def _validate_metric_blocks(value: Any) -> None:
@@ -122,7 +148,7 @@ def _validate_metric_blocks(value: Any) -> None:
         if {"value", "quality", "unit"}.issubset(value):
             metric_value(value["value"], quality=value["quality"], unit=value["unit"])
         for key, child in value.items():
-            if str(key).lower() in _SECRET_FIELD_NAMES:
+            if _is_secret_field_name(key):
                 raise ValueError("snapshots must not contain secrets")
             _validate_metric_blocks(child)
     elif isinstance(value, (list, tuple)):
@@ -158,20 +184,22 @@ def validate_snapshot_v2(snapshot: Mapping[str, Any]) -> None:
         raise ValueError("stats and health must be objects")
     if not {"usage", "quota"}.issubset(snapshot["stats"]):
         raise ValueError("stats must contain usage and quota")
-    session_keys: set[str] = set()
-    for session in snapshot["sessions"]:
-        if not isinstance(session, Mapping):
-            raise ValueError("sessions must contain objects")
-        for name in ("node_id", "provider", "session_id", "session_key"):
-            _string(session.get(name), f"session {name}")
-        expected = "{}:{}:{}".format(session["node_id"], session["provider"],
-                                      session["session_id"])
-        if session["session_key"] != expected or session["session_key"] in session_keys:
-            raise ValueError("session keys must be unique composite identities")
-        session_keys.add(session["session_key"])
-        for numeric in ("ctxPct", "elapsed", "tokensWin", "source_age_s"):
-            if session.get(numeric) is not None:
-                _number(session[numeric], numeric, maximum=100 if numeric == "ctxPct" else None)
+    for collection_name in ("sessions", "catalog"):
+        session_keys: set[str] = set()
+        for session in snapshot[collection_name]:
+            if not isinstance(session, Mapping):
+                raise ValueError(f"{collection_name} must contain objects")
+            for name in ("node_id", "provider", "session_id", "session_key"):
+                _string(session.get(name), f"{collection_name} {name}")
+            expected = "{}:{}:{}".format(session["node_id"], session["provider"],
+                                          session["session_id"])
+            if session["session_key"] != expected or session["session_key"] in session_keys:
+                raise ValueError(f"{collection_name} keys must be unique composite identities")
+            session_keys.add(session["session_key"])
+            for numeric in ("ctxPct", "elapsed", "tokensWin", "source_age_s"):
+                if session.get(numeric) is not None:
+                    _number(session[numeric], numeric,
+                            maximum=100 if numeric == "ctxPct" else None)
     _validate_metric_blocks(snapshot)
 
 

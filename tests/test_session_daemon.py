@@ -203,6 +203,30 @@ class PayloadFreshnessTests(unittest.TestCase):
         self.assertEqual("test-token-not-real", request.get_header("X-monitor-token"))
         self.assertNotIn("test-token-not-real", request.full_url)
 
+    def test_v2_suppresses_out_of_range_legacy_claude_context(self):
+        """A legacy 999% Claude estimate must not terminate or contaminate a v2 snapshot."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "claude" / "project"
+            project.mkdir(parents=True)
+            transcript = {
+                "type": "assistant", "sessionId": "claude-context-999",
+                "timestamp": NOW.isoformat(), "cwd": str(root / "project"),
+                "message": {"model": "claude-test", "content": [{
+                    "type": "tool_use", "name": "Bash", "id": "tool-1",
+                }], "usage": {"input_tokens": 9_990_000}},
+            }
+            (project / "session.jsonl").write_text(json.dumps(transcript) + "\n",
+                                                    encoding="utf-8")
+            payload = session_daemon.build_payload_v2(
+                root / "claude", root / "missing-index", 6, timezone.utc,
+                node_id="office-node", device_id="desk-display",
+                daemon_instance_id="daemon-17", sequence=9, now=NOW)
+        session = payload["sessions"][0]
+        self.assertIsNone(session["ctxPct"])
+        self.assertEqual({"value": None, "quality": "unknown", "unit": "percent"},
+                         session["context"])
+
 
 if __name__ == "__main__":
     unittest.main()
