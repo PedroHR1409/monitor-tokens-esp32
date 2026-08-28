@@ -428,14 +428,15 @@ def count_active_12h(projects_dir: Path, codex_index: Path, now: datetime) -> in
     return len(active)
 
 
-def fetch_id_list(base_url: str, path: str, key: str, timeout: float = 3.0) -> set:
+def fetch_id_list(base_url: str, path: str, key: str, timeout: float = 3.0,
+                  token: str | None = None) -> set:
     """Le uma lista de ids mantida pelo device (escondidas ou fixadas).
 
     O estado mora no ESP32 porque quem escondeu/escolheu foi o dedo do usuario no
     painel. Device fora do ar devolve conjunto vazio — degrada, nao quebra.
     """
     try:
-        with urllib.request.urlopen(authenticated_request(base_url + path),
+        with urllib.request.urlopen(authenticated_request(base_url + path, token=token),
                                     timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return {str(x) for x in data.get(key, [])}
@@ -624,8 +625,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
     avisos_anteriores: list = []
 
     while True:
-        hidden = fetch_id_list(base, "/hidden", "hidden")
-        pinned = fetch_id_list(base, "/pinned", "pinned")
+        hidden = fetch_id_list(base, "/hidden", "hidden", token=transport_token)
+        pinned = fetch_id_list(base, "/pinned", "pinned", token=transport_token)
         if args.protocol == 1:
             payload = build_payload_v1(claude_dir, codex_index, args.max_sessions, tz,
                                        hidden=hidden, pinned=pinned)

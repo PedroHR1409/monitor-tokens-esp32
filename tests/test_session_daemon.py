@@ -320,6 +320,61 @@ class PayloadFreshnessTests(unittest.TestCase):
         self.assertEqual(configured_token, captured[0].get_header("X-monitor-token"))
         self.assertNotIn(configured_token, output.getvalue())
 
+    def test_run_uses_toml_token_for_hidden_and_pinned_gets(self):
+        """Falling back to the legacy token on GET would make TOML-only auth inconsistent."""
+        toml_token = "toml-token-for-get-only-123456"
+        legacy_token = "legacy-token-must-not-win-654321"
+
+        class Response:
+            def __init__(self, payload: bytes):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self):
+                return self.payload
+
+        requests = []
+        def receive(request, timeout):
+            requests.append(request)
+            if request.full_url.endswith("/hidden"):
+                return Response(b'{"hidden": []}')
+            if request.full_url.endswith("/pinned"):
+                return Response(b'{"pinned": []}')
+            self.fail("unexpected request")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file = root / "monitor.toml"
+            config_file.write_text('[transport]\napi_token = "{}"\n'.format(toml_token),
+                                   encoding="utf-8")
+            config = MonitorConfig.load(config_file, environ={})
+            args = SimpleNamespace(host="test-device", port=80, interval=1.0,
+                                   tz_offset=0.0, claude_dir=str(root / "claude"),
+                                   codex_index=str(root / "codex-index"), max_sessions=6,
+                                   protocol=1, once=True)
+            previous = session_daemon.MONITOR_API_TOKEN
+            session_daemon.MONITOR_API_TOKEN = legacy_token
+            output = io.StringIO()
+            try:
+                with patch.object(session_daemon, "post_sessions", return_value=True), \
+                     patch.object(session_daemon, "hook_warnings", return_value=[]), \
+                     patch.object(session_daemon.urllib.request, "urlopen", side_effect=receive), \
+                     redirect_stdout(output):
+                    self.assertEqual(0, session_daemon.run(args, config))
+            finally:
+                session_daemon.MONITOR_API_TOKEN = previous
+        self.assertEqual(["/hidden", "/pinned"],
+                         [request.full_url.removeprefix("http://test-device:80")
+                          for request in requests])
+        self.assertEqual([toml_token, toml_token],
+                         [request.get_header("X-monitor-token") for request in requests])
+        self.assertNotIn(toml_token, output.getvalue())
+
 
 class CodexWindowTokenTests(unittest.TestCase):
     def test_rollout_counter_reset_keeps_new_usage_inside_session_window(self):
