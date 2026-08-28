@@ -140,6 +140,54 @@ api_token = "toml-secret"
             with self.assertRaisesRegex(ValueError, "daemon.timezone"):
                 MonitorConfig.load(path, environ={})
 
+    def test_load_rejects_unknown_root_keys_and_sections(self):
+        """Ignoring a root typo would silently run a daemon with different settings."""
+        from monitor_config import MonitorConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "monitor.toml"
+            for contents in ("bogus = 1", "[bogus]\nvalue = 1"):
+                with self.subTest(contents=contents):
+                    path.write_text(contents, encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "unknown root setting"):
+                        MonitorConfig.load(path, environ={})
+
+    def test_load_reports_a_non_string_daemon_role_as_a_configuration_error(self):
+        """An array role must not crash validation before the daemon can report bad config."""
+        from monitor_config import MonitorConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "monitor.toml"
+            path.write_text("[daemon]\nrole = ['standalone']", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "daemon.role"):
+                MonitorConfig.load(path, environ={})
+
+    def test_load_rejects_non_finite_positive_numbers(self):
+        """NaN or infinity intervals/timeouts would make scheduling behavior undefined."""
+        from monitor_config import MonitorConfig
+
+        cases = (
+            ("[daemon]\ninterval_s = nan", "daemon.interval_s"),
+            ("[transport]\ntimeout_s = inf", "transport.timeout_s"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "monitor.toml"
+            for contents, message in cases:
+                with self.subTest(contents=contents):
+                    path.write_text(contents, encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, message):
+                        MonitorConfig.load(path, environ={})
+
+    def test_load_rejects_an_empty_storage_database_path(self):
+        """An empty database path must not turn the configuration directory into a database."""
+        from monitor_config import MonitorConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "monitor.toml"
+            path.write_text('[storage]\ndatabase_path = "   "', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "storage.database_path"):
+                MonitorConfig.load(path, environ={})
+
     def test_redacted_dict_never_exposes_a_configured_token(self):
         """Returning the token from config show or doctor would leak credentials to logs."""
         from monitor_config import MonitorConfig

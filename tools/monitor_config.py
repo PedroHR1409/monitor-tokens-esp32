@@ -6,11 +6,17 @@ service consumer sees one validated snapshot of the user's settings.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 import os
 from pathlib import Path
 import sys
 import tomllib
 from typing import Any, Mapping
+
+
+CONFIG_SECTIONS = frozenset({
+    "daemon", "device", "storage", "node", "transport", "usage", "alerts", "service",
+})
 
 
 def config_path() -> Path:
@@ -102,6 +108,7 @@ class MonitorConfig:
         """
         source = Path(path) if path is not None else config_path()
         values = _read_toml(source)
+        _validate_root_keys(values)
         base = source.parent
         daemon = DaemonSettings(**_section(values, "daemon", {
             "role": "standalone", "interval_s": 5.0, "timezone": "America/Sao_Paulo",
@@ -216,6 +223,12 @@ def _read_toml(path: Path) -> dict[str, Any]:
     return parsed
 
 
+def _validate_root_keys(values: Mapping[str, Any]) -> None:
+    unknown = set(values) - CONFIG_SECTIONS
+    if unknown:
+        raise ValueError("unknown root setting(s): {}".format(", ".join(sorted(unknown))))
+
+
 def _redact(value: Any, field_name: str = "") -> Any:
     normalized = field_name.lower().replace("-", "_")
     if any(marker in normalized for marker in ("token", "secret", "password", "api_key")):
@@ -243,11 +256,14 @@ def _section(values: Mapping[str, Any], name: str,
 def _resolve_path(value: object, base: Path) -> Path:
     if not isinstance(value, (str, Path)):
         raise ValueError("storage.database_path must be a path string")
+    if isinstance(value, str) and not value.strip():
+        raise ValueError("storage.database_path must not be empty")
     path = Path(value)
     return path if path.is_absolute() else base / path
 
 
 def _validate(config: MonitorConfig) -> None:
+    _non_empty_string(config.daemon.role, "daemon.role")
     if config.daemon.role not in {"standalone", "satellite", "aggregator"}:
         raise ValueError("daemon.role must be standalone, satellite, or aggregator")
     _positive_number(config.daemon.interval_s, "daemon.interval_s")
@@ -277,7 +293,8 @@ def _validate(config: MonitorConfig) -> None:
 
 
 def _positive_number(value: object, label: str) -> None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0 \
+            or isinstance(value, float) and not math.isfinite(value):
         raise ValueError("{} must be positive".format(label))
 
 
