@@ -72,6 +72,7 @@ class TransportSettings:
 class UsageSettings:
     claude_context_window: int = 0
     claude_5h_budget: int = 0
+    opencode_context_window: int = 0
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,7 @@ class MonitorConfig:
         transport = TransportSettings(**transport_values)
         usage = UsageSettings(**_section(values, "usage", {
             "claude_context_window": 0, "claude_5h_budget": 0,
+            "opencode_context_window": 0,
         }))
         alerts = AlertSettings(**_section(values, "alerts", {
             "warning_after_s": 90, "critical_after_s": 300, "snooze_minutes": 15,
@@ -181,6 +183,7 @@ api_token = \"\"
 [usage]
 # claude_context_window = 0
 # claude_5h_budget = 0
+# opencode_context_window = 0
 
 [alerts]
 # warning_after_s = 90
@@ -283,6 +286,7 @@ def _validate(config: MonitorConfig) -> None:
         raise ValueError("transport.prefer_websocket must be a boolean")
     _non_negative_int(config.usage.claude_context_window, "usage.claude_context_window")
     _non_negative_int(config.usage.claude_5h_budget, "usage.claude_5h_budget")
+    _non_negative_int(config.usage.opencode_context_window, "usage.opencode_context_window")
     _non_negative_int(config.alerts.warning_after_s, "alerts.warning_after_s")
     _non_negative_int(config.alerts.critical_after_s, "alerts.critical_after_s")
     _non_negative_int(config.alerts.snooze_minutes, "alerts.snooze_minutes")

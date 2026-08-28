@@ -33,6 +33,9 @@ from session_hook import hook_health, load_event_store
 from session_meta import CODEX_SESSIONS, codex_meta, read_git_branch, context_usage
 from usage_tracker import collect as collect_usage, collect_series, session_tokens
 from quota import collect as collect_quota
+from opencode_sessions import (count_active_12h as count_opencode_12h,
+                               db_path as opencode_default_db,
+                               scan_opencode_sessions)
 from protocol_v2 import build_snapshot_v2
 from monitor_config import MonitorConfig
 
@@ -462,8 +465,13 @@ def hook_warnings(sessions: list, health: dict) -> list:
 
 def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
                      tz: timezone, now: datetime | None = None,
-                     hidden: set | None = None, pinned: set | None = None) -> dict:
-    """Payload legÃ­vel pelo firmware v1 durante a migraÃ§Ã£o do protocolo."""
+                     hidden: set | None = None, pinned: set | None = None,
+                     opencode_db: Path | None = None,
+                     opencode_ctx_window: int = 0) -> dict:
+    """Payload legÃ­vel pelo firmware v1 durante a migraÃ§Ã£o do protocolo.
+
+    `opencode_db=None` desliga a coleta do OpenCode (tests hermeticos); o daemon
+    passa o caminho real (padrao do usuario ou --opencode-db)."""
     now = now or datetime.now(timezone.utc)
     dismissed = load_dismissed()
     hidden = hidden or set()
@@ -472,6 +480,9 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
     token_since = now - timedelta(seconds=SESSION_TOKEN_WINDOW_S)
     todas = (scan_claude_sessions(claude_dir, now)
              + scan_codex_sessions(codex_index, now, token_since))
+    if opencode_db is not None:
+        todas += scan_opencode_sessions(now, token_since, database=opencode_db,
+                                        ctx_window=opencode_ctx_window)
     todas = filter_dismissed(todas, dismissed)
     visiveis = [s for s in todas if s["id"] not in hidden]
 
@@ -498,7 +509,7 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
     catalogo = [s for s in todas if s["id"] not in no_board]
     catalogo.sort(key=lambda s: s["_age"])
     catalogo = [{"id": s["id"], "name": s["full"][:25],
-                 "tool": s["tool"], "state": s["state"]}
+                 "provider": s.get("provider", ""), "tool": s["tool"], "state": s["state"]}
                 for s in catalogo[:CATALOG_MAX]]
 
     usage = collect_usage(claude_dir, tz, now)
@@ -511,7 +522,9 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
             "tokens_today": usage["tokens_today"],
             "spark": usage["spark"],
             "spark_end_hour": usage["spark_end_hour"],
-            "active_12h": count_active_12h(claude_dir, codex_index, now),
+            "active_12h": (count_active_12h(claude_dir, codex_index, now)
+                           + (count_opencode_12h(opencode_db, now, ACTIVE_WINDOW_S)
+                              if opencode_db is not None else 0)),
             "token_window_h": SESSION_TOKEN_WINDOW_H,
             "total_sessions": total,
             "quota": collect_quota(claude_dir, now),
@@ -527,11 +540,13 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
                      tz: timezone, *, node_id: str, device_id: str,
                      daemon_instance_id: str, sequence: int,
                      now: datetime | None = None, hidden: set | None = None,
-                     pinned: set | None = None) -> dict:
+                     pinned: set | None = None, opencode_db: Path | None = None,
+                     opencode_ctx_window: int = 0) -> dict:
     """Projeta os dados normalizados atuais no envelope estÃ¡vel do protocolo v2."""
     generated = now or datetime.now(timezone.utc)
     v1 = build_payload_v1(claude_dir, codex_index, max_sessions, tz, generated,
-                          hidden=hidden, pinned=pinned)
+                          hidden=hidden, pinned=pinned, opencode_db=opencode_db,
+                          opencode_ctx_window=opencode_ctx_window)
     legacy_stats = v1["stats"]
     series = collect_series(claude_dir, CODEX_SESSIONS, tz, generated)
     usage = {"series": [{"provider": item.provider, "buckets": dict(item.buckets),
@@ -586,6 +601,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--interval", type=float, default=None)
     ap.add_argument("--claude-dir", default=str(Path.home() / ".claude" / "projects"))
     ap.add_argument("--codex-index", default=str(Path.home() / ".codex" / "session_index.jsonl"))
+    ap.add_argument("--opencode-db", default=None,
+                    help="caminho do opencode.db (padrao: ~/.local/share/opencode/opencode.db)")
     ap.add_argument("--max-sessions", type=int, default=MAX_SESSIONS)
     ap.add_argument("--tz-offset", type=float, default=-3.0,
                     help="fuso para o corte do dia (padrao -3 = horario de Brasilia)")
@@ -628,20 +645,50 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
     while True:
         hidden = fetch_id_list(base, "/hidden", "hidden", token=transport_token)
         pinned = fetch_id_list(base, "/pinned", "pinned", token=transport_token)
+        opencode_db = (Path(args.opencode_db) if getattr(args, "opencode_db", None)
+                       else opencode_default_db())
+        ctx_window = config.usage.opencode_context_window
         if args.protocol == 1:
             payload = build_payload_v1(claude_dir, codex_index, args.max_sessions, tz,
-                                       hidden=hidden, pinned=pinned)
+                                       hidden=hidden, pinned=pinned,
+                                       opencode_db=Path(opencode_db) if opencode_db else None,
+                                       opencode_ctx_window=ctx_window)
             st = payload["stats"]
         else:
             sequence += 1
             payload = build_payload_v2(
                 claude_dir, codex_index, args.max_sessions, tz, node_id=node_id,
                 device_id=device_id, daemon_instance_id=daemon_instance_id,
-                sequence=sequence, hidden=hidden, pinned=pinned)
+                sequence=sequence, hidden=hidden, pinned=pinned,
+                opencode_db=Path(opencode_db) if opencode_db else None,
+                opencode_ctx_window=ctx_window)
             st = payload["stats"]["usage"]
         today_tokens = usage_total_for_log(st)
         ok = post_sessions(url, payload, timeout=config.transport.timeout_s,
                            token=transport_token)
+        if not ok and any(s.get("tool") == "opencode" for s in payload.get("sessions", [])):
+            # Firmware sem suporte a "opencode" rejeita o POST inteiro (422) — melhor
+            # degradar para Claude/Codex do que derrubar o painel. Avisa uma vez so:
+            # repetir a cada ciclo vira ruido (mesma regra dos avisos de hook).
+            if not getattr(run, "_opencode_fallback_warned", False):
+                print("[daemon] AVISO: firmware nao aceita sessoes OpenCode (422); "
+                      "reenviando sem elas. Compile e grave o firmware novo "
+                      "(pio run -t upload) para exibir OpenCode com icone por modelo.",
+                      file=sys.stderr)
+                run._opencode_fallback_warned = True
+            if args.protocol == 1:
+                payload = build_payload_v1(claude_dir, codex_index, args.max_sessions,
+                                           tz, hidden=hidden, pinned=pinned)
+                st = payload["stats"]
+            else:
+                payload = build_payload_v2(
+                    claude_dir, codex_index, args.max_sessions, tz, node_id=node_id,
+                    device_id=device_id, daemon_instance_id=daemon_instance_id,
+                    sequence=sequence, hidden=hidden, pinned=pinned)
+                st = payload["stats"]["usage"]
+            today_tokens = usage_total_for_log(st)
+            ok = post_sessions(url, payload, timeout=config.transport.timeout_s,
+                               token=transport_token)
 
         # So imprime quando o diagnostico MUDA: repetir o mesmo aviso a cada 5s vira
         # ruido e o operador para de ler justamente a linha que importa.
