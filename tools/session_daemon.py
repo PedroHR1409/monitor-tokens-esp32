@@ -579,7 +579,7 @@ def post_sessions(url: str, payload: dict, timeout: float = 5.0,
 def format_summary(payload: dict) -> str:
     parts = []
     for s in payload["sessions"]:
-        tag = "CL" if s["tool"] == "claude" else "CX"
+        tag = {"claude": "CL", "codex": "CX", "opencode": "OC"}.get(s["tool"], "??")
         parts.append("{}[{}:{}]".format(s["project"], tag, s["state"]))
     return ", ".join(parts) or "(nenhuma sessao)"
 

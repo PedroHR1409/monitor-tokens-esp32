@@ -167,9 +167,9 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
             "context_tokens": context_tokens,
             "tool": "opencode",
             "state": state,
-            "elapsed": age,
+            "elapsed": int(age),        # firmware exige uint64 no JSON (422 senao)
             "source_stale": age > SOURCE_STALE_AFTER_S and state == "work",
-            "source_age_s": age,
+            "source_age_s": int(age),
             "diagnostic": "" if ctx_window > 0 else "no_context_window",
             "_age": age,
         })
