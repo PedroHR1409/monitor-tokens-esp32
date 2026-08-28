@@ -1,0 +1,10 @@
+{
+  "config": {"present": true},
+  "token": {"length": 8},
+  "paths": {"claude": false, "codex": true},
+  "hooks": {"claude": false, "codex": true},
+  "python": {"version": [3, 11]},
+  "platformio": {"available": false},
+  "storage": {"state": "ok"},
+  "device": {"state": "unreachable"}
+}

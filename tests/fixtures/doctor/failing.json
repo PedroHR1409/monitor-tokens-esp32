@@ -1,0 +1,10 @@
+{
+  "config": {"present": false},
+  "token": {"length": 0},
+  "paths": {"claude": true, "codex": true},
+  "hooks": {"claude": true, "codex": true},
+  "python": {"version": [3, 11]},
+  "platformio": {"available": true},
+  "storage": {"state": "fail", "detail": "fixture-password-must-never-appear"},
+  "device": {"state": "ok", "protocols": [1]}
+}

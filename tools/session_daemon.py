@@ -34,6 +34,7 @@ from session_meta import CODEX_SESSIONS, codex_meta, read_git_branch, context_us
 from usage_tracker import collect as collect_usage, collect_series, session_tokens
 from quota import collect as collect_quota
 from protocol_v2 import build_snapshot_v2
+from monitor_config import MonitorConfig
 
 MAX_SESSIONS = 6
 
@@ -574,12 +575,11 @@ def usage_total_for_log(usage: dict) -> int:
     return sum(int(item.get("total") or 0) for item in series if isinstance(item, dict))
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", default="monitor-ai.local")
-    ap.add_argument("--port", type=int, default=80)
-    ap.add_argument("--interval", type=float, default=5.0)
+def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Add daemon flags to either the legacy parser or the unified CLI."""
+    ap.add_argument("--host", default=None)
+    ap.add_argument("--port", type=int, default=None)
+    ap.add_argument("--interval", type=float, default=None)
     ap.add_argument("--claude-dir", default=str(Path.home() / ".claude" / "projects"))
     ap.add_argument("--codex-index", default=str(Path.home() / ".codex" / "session_index.jsonl"))
     ap.add_argument("--max-sessions", type=int, default=MAX_SESSIONS)
@@ -588,13 +588,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--protocol", type=int, choices=(1, 2), default=2,
                     help="versao do payload (padrao: 2; use 1 para firmware legado)")
     ap.add_argument("--once", action="store_true")
-    return ap.parse_args(argv)
+    return ap
 
 
-def main() -> None:
-    args = parse_args()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    return add_arguments(ap).parse_args(argv)
 
-    base = "http://{}:{}".format(args.host, args.port)
+
+def run(args: argparse.Namespace, config: MonitorConfig) -> int:
+    """Run the daemon from parsed options and one immutable config snapshot."""
+    host = args.host if args.host is not None else config.device.host
+    port = args.port if args.port is not None else config.device.port
+    interval = args.interval if args.interval is not None else config.daemon.interval_s
+
+    base = "http://{}:{}".format(host, port)
     url = base + ("/api/v2/snapshot" if args.protocol == 2 else "/sessions")
     tz = timezone(timedelta(hours=args.tz_offset))
     claude_dir, codex_index = Path(args.claude_dir), Path(args.codex_index)
@@ -604,7 +613,7 @@ def main() -> None:
     sequence = 0
 
     print("[daemon] Monitor.AI -> {} a cada {}s (dia em UTC{:+g}, board = ultimas {:.0f}h)"
-          .format(url, args.interval, args.tz_offset, BOARD_WINDOW_S / 3600))
+          .format(url, interval, args.tz_offset, BOARD_WINDOW_S / 3600))
 
     # Relido a cada ciclo de proposito: os arquivos de hook sao globais e outra
     # ferramenta pode reescreve-los com o daemon ja rodando — foi assim que aconteceu.
@@ -644,8 +653,19 @@ def main() -> None:
 
         if args.once:
             break
-        time.sleep(args.interval)
+        time.sleep(interval)
+    return 0
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        config = MonitorConfig.load()
+    except ValueError as error:
+        print("[daemon] configuracao invalida: {}".format(error), file=sys.stderr)
+        return 2
+    return run(args, config)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

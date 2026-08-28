@@ -14,6 +14,7 @@ sys.path.insert(0, str(TOOLS))
 
 import session_daemon
 import session_meta
+from monitor_config import MonitorConfig
 from session_hook import record_event
 
 
@@ -248,6 +249,23 @@ class PayloadFreshnessTests(unittest.TestCase):
              patch.object(session_daemon, "hook_warnings", return_value=[]):
             session_daemon.main()
         posted.assert_called_once()
+
+    def test_run_accepts_a_config_snapshot_without_breaking_one_cycle_execution(self):
+        """Ignoring config.device would make the unified CLI send to the wrong display."""
+        args = SimpleNamespace(host=None, port=None, interval=None,
+                               tz_offset=0.0, claude_dir="claude",
+                               codex_index="codex-index", max_sessions=6,
+                               protocol=2, once=True)
+        config = MonitorConfig.load("missing-monitor.toml", environ={})
+        payload = {"sessions": [], "stats": {"usage": {
+            "series": [], "active_12h": 0,
+        }}}
+        with patch.object(session_daemon, "fetch_id_list", return_value=set()), \
+             patch.object(session_daemon, "build_payload_v2", return_value=payload), \
+             patch.object(session_daemon, "post_sessions", return_value=True) as posted, \
+             patch.object(session_daemon, "hook_warnings", return_value=[]):
+            self.assertEqual(0, session_daemon.run(args, config))
+        self.assertTrue(posted.call_args.args[0].startswith("http://monitor-ai.local:80/"))
 
 
 class CodexWindowTokenTests(unittest.TestCase):
