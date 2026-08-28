@@ -11,6 +11,7 @@ from typing import Mapping
 
 import doctor
 from monitor_config import MonitorConfig, config_path, write_example
+import service_manager
 import session_daemon
 from session_hook import hook_health
 
@@ -40,6 +41,13 @@ def _parser() -> argparse.ArgumentParser:
     hooks = commands.add_parser("hooks", parents=[common], help="inspect hook setup")
     hook_commands = hooks.add_subparsers(dest="hooks_command", required=True)
     hook_commands.add_parser("check", help="report Claude and Codex hook health")
+
+    service = commands.add_parser("service", parents=[common], help="manage the per-user daemon")
+    service_commands = service.add_subparsers(dest="service_command", required=True)
+    for action in ("install", "remove", "status"):
+        command = service_commands.add_parser(action, help="{} the user service".format(action))
+        command.add_argument("--dry-run", action="store_true",
+                             help="show the operation without changing service state")
     return parser
 
 
@@ -58,6 +66,19 @@ def _print_doctor(results: list[doctor.CheckResult], as_json: bool) -> None:
 def main(argv: list[str] | None = None, environ: Mapping[str, str] = os.environ) -> int:
     args = _parser().parse_args(argv)
     source = args.config if args.config is not None else config_path()
+    if args.command == "service":
+        python_path = Path(sys.executable).resolve()
+        repository_path = Path(__file__).resolve().parents[1]
+        config_file = source.expanduser().resolve()
+        if args.service_command == "install":
+            result = service_manager.service_install(
+                python_path, repository_path, config_file, dry_run=args.dry_run)
+        elif args.service_command == "remove":
+            result = service_manager.service_remove(dry_run=args.dry_run)
+        else:
+            result = service_manager.service_status(dry_run=args.dry_run)
+        print(result.message)
+        return result.returncode
     try:
         config = _load_config(args.config, environ)
     except ValueError as error:
