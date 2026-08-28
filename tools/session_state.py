@@ -29,8 +29,10 @@ from agent_events import MAX_FUTURE_SKEW_S, parse_aware_timestamp
 # Tipos de linha que representam conversa de verdade. Todo o resto e bookkeeping.
 CONVERSATIONAL = ("user", "assistant")
 
-# Nome da tool que caracteriza "modelo perguntou algo e espera resposta".
-ASK_TOOL = "AskUserQuestion"
+# Tools que caracterizam "modelo perguntou algo e espera resposta".
+QUESTION_TOOLS = frozenset({
+    "AskUserQuestion", "ExitPlanMode", "request_user_input", "requestUserInput",
+})
 
 # NAO EXISTE heuristica de tempo para 'perm'.
 #
@@ -96,7 +98,7 @@ def conversational_events(objs: list) -> list:
 
 
 def _has_pending_ask(objs: list) -> bool:
-    """True se o ultimo evento do assistant tem um AskUserQuestion sem resposta."""
+    """True se o último evento do assistant tem uma pergunta sem resposta."""
     convs = conversational_events(objs)
     if not convs:
         return False
@@ -104,7 +106,7 @@ def _has_pending_ask(objs: list) -> bool:
     if last.get("type") != "assistant":
         return False
     tools = _tool_uses(last)
-    if not any(t.get("name") == ASK_TOOL for t in tools):
+    if not any(t.get("name") in QUESTION_TOOLS for t in tools):
         return False
     pending = {t.get("id") for t in tools}
     idx = objs.index(last) if last in objs else -1
@@ -166,7 +168,7 @@ def infer_state(objs: list, now: datetime | None = None,
         return ("work", age) if age <= WORK_MAX_AGE_S else ("free", age)
 
     # Ha tool_use sem resposta.
-    if any(t.get("name") == ASK_TOOL for t in tools):
+    if any(t.get("name") in QUESTION_TOOLS for t in tools):
         return "ask", age          # modelo perguntou e espera voce (sinal exato)
     # Ferramenta emitida e ainda sem retorno = ferramenta EXECUTANDO. Nao ha como o
     # transcript dizer se ela esta bloqueada por permissao; quem diz isso e o hook,

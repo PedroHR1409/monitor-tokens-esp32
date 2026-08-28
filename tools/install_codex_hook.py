@@ -17,7 +17,7 @@ HOOK_SCRIPT = (Path(__file__).parent / "session_hook.py").resolve()
 EVENTS = {
     "SessionStart": "free",
     "UserPromptSubmit": "work",
-    "PreToolUse": "work",
+    "PreToolUse": "pre_tool_use",
     "PermissionRequest": "permission_request",
     "PostToolUse": "work",
     "Stop": "free",

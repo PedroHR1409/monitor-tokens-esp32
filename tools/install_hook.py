@@ -39,7 +39,7 @@ LEGACY_TAG = "monitor-ai-perm"
 EVENTS = {
     "SessionStart": "free",
     "UserPromptSubmit": "work",
-    "PreToolUse": "work",
+    "PreToolUse": "pre_tool_use",
     "PermissionRequest": "permission_request",
     "PostToolUse": "work",
     "Stop": "free",
@@ -60,6 +60,8 @@ def build_group(event: str, action: str) -> dict:
     }
     if event in {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}:
         group.pop("matcher")
+    if event in {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"}:
+        group["hooks"][0]["async"] = True
     return group
 
 

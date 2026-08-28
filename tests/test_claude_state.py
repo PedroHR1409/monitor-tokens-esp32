@@ -35,6 +35,11 @@ class ClaudeStateTests(unittest.TestCase):
                                perm_pending=True)
         self.assertEqual("ask", state)
 
+    def test_exit_plan_mode_is_ask_even_if_permission_hook_fires(self):
+        state, _ = infer_state([assistant_tool("ExitPlanMode")], NOW,
+                               perm_pending=True)
+        self.assertEqual("ask", state)
+
     def test_invalid_timestamp_degrades_only_that_session(self):
         obj = assistant_tool("Bash")
         obj["timestamp"] = "invalid"

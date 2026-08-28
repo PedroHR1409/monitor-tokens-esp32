@@ -16,11 +16,16 @@ except ImportError:
     load_event_store = record_event = None
 
 try:
+    from session_hook import state_for_action
+except ImportError:
+    state_for_action = lambda *_: "missing"
+
+try:
     from install_codex_hook import build_hooks_config
 except ImportError:
     build_hooks_config = None
 
-from install_hook import EVENTS as CLAUDE_EVENTS
+from install_hook import EVENTS as CLAUDE_EVENTS, build_group as build_claude_group
 
 
 NOW = datetime(2026, 8, 27, 15, 0, tzinfo=timezone.utc)
@@ -28,6 +33,35 @@ NOW = datetime(2026, 8, 27, 15, 0, tzinfo=timezone.utc)
 
 @unittest.skipIf(record_event is None, "session_hook ainda nao implementado")
 class SessionHookTests(unittest.TestCase):
+    def test_pre_tool_question_tools_record_ask_and_complete_as_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.json"
+            payload = {"session_id": "question-id", "tool_name": "AskUserQuestion"}
+            self.assertTrue(record_event(payload, "pre_tool_use", path, NOW))
+            self.assertEqual("ask", load_event_store(path)["question-id"]["state"])
+            self.assertTrue(record_event(payload, "permission_request", path,
+                                         NOW + timedelta(seconds=1)))
+            self.assertEqual("ask", load_event_store(path)["question-id"]["state"])
+            self.assertTrue(record_event(payload, "work", path,
+                                         NOW + timedelta(seconds=2)))
+            self.assertEqual("work", load_event_store(path)["question-id"]["state"])
+
+    def test_question_tool_mapping_is_exact(self):
+        for tool_name in ("AskUserQuestion", "ExitPlanMode", "request_user_input",
+                          "requestUserInput"):
+            self.assertEqual("ask", state_for_action("pre_tool_use", tool_name))
+            self.assertEqual("ask", state_for_action("permission_request", tool_name))
+        self.assertEqual("work", state_for_action("pre_tool_use", "UnknownTool"))
+        self.assertEqual("perm", state_for_action("permission_request", "UnknownTool"))
+
+    def test_camel_case_tool_name_records_question_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.json"
+            self.assertTrue(record_event({"sessionId": "camel-id",
+                                          "toolName": "ExitPlanMode"},
+                                         "pre_tool_use", path, NOW))
+            self.assertEqual("ask", load_event_store(path)["camel-id"]["state"])
+
     def test_permission_is_explicit_and_tool_completion_returns_to_work(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "events.json"
@@ -48,7 +82,7 @@ class SessionHookTests(unittest.TestCase):
             path = Path(tmp) / "events.json"
             record_event({"session_id": "id", "tool_name": "AskUserQuestion"},
                          "permission_request", path, NOW)
-            self.assertEqual("work", load_event_store(path)["id"]["state"])
+            self.assertEqual("ask", load_event_store(path)["id"]["state"])
 
     def test_old_event_cannot_overwrite_newer_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,9 +127,18 @@ class SessionHookModuleContractTests(unittest.TestCase):
     def test_claude_installer_tracks_complete_lifecycle(self):
         self.assertEqual({
             "SessionStart": "free", "UserPromptSubmit": "work",
-            "PreToolUse": "work", "PermissionRequest": "permission_request",
+            "PreToolUse": "pre_tool_use", "PermissionRequest": "permission_request",
             "PostToolUse": "work", "Stop": "free", "SessionEnd": "ended",
         }, CLAUDE_EVENTS)
+
+    def test_claude_informational_hooks_are_asynchronous(self):
+        for event in ("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop",
+                      "SessionEnd"):
+            self.assertTrue(build_claude_group(event, CLAUDE_EVENTS[event])["hooks"][0].get("async"),
+                            event)
+        for event in ("PreToolUse", "PermissionRequest"):
+            self.assertNotIn("async", build_claude_group(event, CLAUDE_EVENTS[event])["hooks"][0],
+                             event)
 
 
 @unittest.skipIf(build_hooks_config is None, "installador Codex ainda nao implementado")
@@ -109,7 +152,7 @@ class CodexHookInstallerTests(unittest.TestCase):
                          result["hooks"]["Stop"][0]["hooks"][0]["command"])
         expected = {
             "SessionStart": "free", "UserPromptSubmit": "work",
-            "PreToolUse": "work", "PermissionRequest": "permission_request",
+            "PreToolUse": "pre_tool_use", "PermissionRequest": "permission_request",
             "PostToolUse": "work", "Stop": "free", "SessionEnd": "ended",
         }
         for event_name, action in expected.items():

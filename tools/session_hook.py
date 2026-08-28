@@ -12,7 +12,9 @@ from pathlib import Path
 
 from agent_events import MAX_FUTURE_SKEW_S, parse_aware_timestamp
 
-QUESTION_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
+QUESTION_TOOLS = frozenset({
+    "AskUserQuestion", "ExitPlanMode", "request_user_input", "requestUserInput",
+})
 
 # Onde cada agente declara seus hooks. Sao arquivos GLOBAIS do usuario, editados por
 # outros produtos alem deste projeto — em 27/08/2026 o Orca substituiu todos os hooks
@@ -24,11 +26,24 @@ CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 CODEX_HOOKS = Path.home() / ".codex" / "hooks.json"
 ACTION_STATE = {
     "work": "work",
+    "pre_tool_use": "work",
     "ask": "ask",
     "permission_request": "perm",
     "free": "free",
     "ended": "ended",
 }
+
+
+def state_for_action(action: str, tool_name: str) -> str:
+    """Deriva o estado do hook, preservando perguntas distintas de permissões.
+
+    Perguntas são conhecidas somente antes da execução e na notificação de
+    permissão; a conclusão usa ``work`` mesmo quando a ferramenta concluída era
+    uma pergunta.
+    """
+    if action in {"pre_tool_use", "permission_request"} and tool_name in QUESTION_TOOLS:
+        return "ask"
+    return ACTION_STATE.get(action, "work")
 
 
 @contextmanager
@@ -130,9 +145,7 @@ def record_event(payload: dict, action: str, state_path: Path,
     now = now.astimezone(timezone.utc)
 
     tool = str(payload.get("tool_name") or payload.get("toolName") or "").strip()
-    state = ACTION_STATE[action]
-    if action == "permission_request" and tool in QUESTION_TOOLS:
-        state = "work"
+    state = state_for_action(action, tool)
 
     lock_path = state_path.with_suffix(state_path.suffix + ".lock")
     with _exclusive_lock(lock_path):
