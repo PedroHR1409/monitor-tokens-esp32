@@ -5,3 +5,6 @@ include/secrets.h
 __pycache__/
 *.pyc
 tools/.dismissed.json
+
+# Local runtime configuration can contain the shared transport token.
+monitor.toml
