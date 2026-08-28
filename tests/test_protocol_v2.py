@@ -147,10 +147,11 @@ class SnapshotEnvelopeTests(unittest.TestCase):
 
 
 class SessionDaemonProtocolSelectionTests(unittest.TestCase):
-    def test_daemon_defaults_to_v2_and_retains_explicit_v1_choice(self):
-        """Changing the default or removing v1 would break the staged firmware migration."""
-        self.assertEqual(2, session_daemon.parse_args([]).protocol)
-        self.assertEqual(1, session_daemon.parse_args(["--protocol", "1"]).protocol)
+    def test_daemon_defaults_to_v1_until_firmware_serves_v2(self):
+        """The firmware only serves /sessions today; v2 must stay an explicit opt-in
+        until /api/v2/snapshot ships, or the stock daemon 404s against the board."""
+        self.assertEqual(1, session_daemon.parse_args([]).protocol)
+        self.assertEqual(2, session_daemon.parse_args(["--protocol", "2"]).protocol)
         with redirect_stderr(StringIO()):
             with self.assertRaises(SystemExit):
                 session_daemon.parse_args(["--protocol", "3"])

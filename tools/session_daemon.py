@@ -589,8 +589,9 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--max-sessions", type=int, default=MAX_SESSIONS)
     ap.add_argument("--tz-offset", type=float, default=-3.0,
                     help="fuso para o corte do dia (padrao -3 = horario de Brasilia)")
-    ap.add_argument("--protocol", type=int, choices=(1, 2), default=2,
-                    help="versao do payload (padrao: 2; use 1 para firmware legado)")
+    ap.add_argument("--protocol", type=int, choices=(1, 2), default=1,
+                    help="versao do payload (padrao: 1, a unica servida pelo firmware "
+                         "atual; use 2 quando o endpoint /api/v2/snapshot existir)")
     ap.add_argument("--once", action="store_true")
     return ap
 
