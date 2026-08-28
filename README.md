@@ -58,6 +58,48 @@ pio device monitor
 3. O grid permanece vazio até o primeiro `POST /sessions` válido. Para demonstração
    visual isolada, compile o ambiente `esp32-s3-3v5-lcd-demo`.
 
+### Configuração do daemon (`monitor.toml`)
+
+O daemon lê um `monitor.toml` por usuário (padrão: `%APPDATA%\monitor-ai\monitor.toml`
+no Windows, `~/.config/monitor-ai/monitor.toml` no Linux). Para gerar um exemplo
+seguro e ver a configuração ativa (token sempre redigido):
+
+```powershell
+python tools/monitor.py config init   # escreve o exemplo, sem sobrescrever
+python tools/monitor.py config show   # imprime a config ativa em JSON redigido
+```
+
+Seções principais: `device` (host/IP do painel), `transport` (`api_token` — o mesmo
+de `secrets.h`), `storage` (banco SQLite e retenção) e `alerts` (limiares de
+`perm`/`ask` parado). O mesmo token pode ser injetado por `MONITOR_API_TOKEN`.
+
+### CLI unificado e diagnóstico
+
+Todo o lado PC fica em `tools/monitor.py` (só Python padrão):
+
+```powershell
+python tools/monitor.py run       # daemon contínuo (equivalente ao session_daemon.py)
+python tools/monitor.py once      # um ciclo, útil para testar sem loop
+python tools/monitor.py doctor    # checagem completa do setup local
+python tools/monitor.py hooks check   # saúde dos hooks de estado (Claude/Codex)
+```
+
+### Daemon como serviço de usuário (opcional)
+
+Para o painel funcionar sem terminal aberto, instale o daemon como serviço **por
+usuário** — sem direitos de administrador e sem tocar em diretórios de sistema
+(Agendador de Tarefas do usuário no Windows; `~/.config/systemd/user/` no Linux):
+
+```powershell
+python tools/monitor.py service install --dry-run   # mostra o que seria feito
+python tools/monitor.py service install             # instala e ativa
+python tools/monitor.py service status              # consulta o estado
+python tools/monitor.py service remove              # remove (só o serviço deste usuário)
+```
+
+O serviço aponta para caminhos absolutos resolvidos no momento da instalação
+(interpretador, checkout e `monitor.toml`) — se mover o repositório, reinstale.
+
 Detalhes do protocolo, das heurísticas de estado (Claude vs Codex) e das limitações conhecidas:
 `docs/SPEC.md` seção 5.
 
@@ -205,7 +247,8 @@ pio run -e esp32-s3-3v5-lcd-demo
 ## Validação local
 
 ```powershell
-python -m unittest discover -s tests -v
-python tools/check_secrets.py
-pio run -e esp32-s3-3v5-lcd
+python -m pytest tests/ -q            # 152 testes (unittest também funciona)
+python tools/check_secrets.py         # garante nada sensível fora de secrets.h
+python tools/monitor.py doctor        # setup local completo
+pio run -e esp32-s3-3v5-lcd           # compila o firmware
 ```
