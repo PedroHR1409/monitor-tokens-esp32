@@ -564,16 +564,23 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
 
 
 def post_sessions(url: str, payload: dict, timeout: float = 5.0,
-                  token: str | None = None) -> bool:
+                  token: str | None = None) -> int:
+    """Status HTTP do POST: 2xx = ok; 422 = firmware rejeitou; 0 = falha de rede.
+
+    A distincao importa: 422 com sessao OpenCode e sinal de firmware antigo (fallback
+    util); timeout/erro de rede nao e — reenviar sem OpenCode atrasa e engana."""
     body = json.dumps(payload).encode("utf-8")
     req = authenticated_request(url, data=body, method="POST",
                                 headers={"Content-Type": "application/json"}, token=token)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return 200 <= resp.status < 300
+            return resp.status
+    except urllib.error.HTTPError as e:
+        print(f"[daemon] falha ao enviar para {url}: HTTP Error {e.code}", file=sys.stderr)
+        return e.code
     except (urllib.error.URLError, OSError) as e:
         print(f"[daemon] falha ao enviar para {url}: {e}", file=sys.stderr)
-        return False
+        return 0
 
 
 def format_summary(payload: dict) -> str:
@@ -664,12 +671,15 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                 opencode_ctx_window=ctx_window)
             st = payload["stats"]["usage"]
         today_tokens = usage_total_for_log(st)
-        ok = post_sessions(url, payload, timeout=config.transport.timeout_s,
-                           token=transport_token)
-        if not ok and any(s.get("tool") == "opencode" for s in payload.get("sessions", [])):
+        status = post_sessions(url, payload, timeout=config.transport.timeout_s,
+                               token=transport_token)
+        if status == 422 and any(s.get("tool") == "opencode"
+                                 for s in payload.get("sessions", [])):
             # Firmware sem suporte a "opencode" rejeita o POST inteiro (422) — melhor
             # degradar para Claude/Codex do que derrubar o painel. Avisa uma vez so:
             # repetir a cada ciclo vira ruido (mesma regra dos avisos de hook).
+            # Timeout/erro de rede NAO cai aqui (status 0): reenviar sem OpenCode
+            # nesse caso atrasaria o ciclo e imprimiria um aviso falso.
             if not getattr(run, "_opencode_fallback_warned", False):
                 print("[daemon] AVISO: firmware nao aceita sessoes OpenCode (422); "
                       "reenviando sem elas. Compile e grave o firmware novo "
@@ -687,8 +697,9 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                     sequence=sequence, hidden=hidden, pinned=pinned)
                 st = payload["stats"]["usage"]
             today_tokens = usage_total_for_log(st)
-            ok = post_sessions(url, payload, timeout=config.transport.timeout_s,
-                               token=transport_token)
+            status = post_sessions(url, payload, timeout=config.transport.timeout_s,
+                                   token=transport_token)
+        ok = 200 <= status < 300
 
         # So imprime quando o diagnostico MUDA: repetir o mesmo aviso a cada 5s vira
         # ruido e o operador para de ler justamente a linha que importa.

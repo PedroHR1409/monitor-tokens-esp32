@@ -247,7 +247,7 @@ class PayloadFreshnessTests(unittest.TestCase):
         with patch.object(session_daemon, "parse_args", return_value=args), \
              patch.object(session_daemon, "fetch_id_list", return_value=set()), \
              patch.object(session_daemon, "build_payload_v2", return_value=payload), \
-             patch.object(session_daemon, "post_sessions", return_value=True) as posted, \
+             patch.object(session_daemon, "post_sessions", return_value=200) as posted, \
              patch.object(session_daemon, "hook_warnings", return_value=[]):
             session_daemon.main()
         posted.assert_called_once()
@@ -264,7 +264,7 @@ class PayloadFreshnessTests(unittest.TestCase):
         }}}
         with patch.object(session_daemon, "fetch_id_list", return_value=set()), \
              patch.object(session_daemon, "build_payload_v2", return_value=payload), \
-             patch.object(session_daemon, "post_sessions", return_value=True) as posted, \
+             patch.object(session_daemon, "post_sessions", return_value=200) as posted, \
              patch.object(session_daemon, "hook_warnings", return_value=[]):
             self.assertEqual(0, session_daemon.run(args, config))
         self.assertTrue(posted.call_args.args[0].startswith("http://monitor-ai.local:80/"))
@@ -279,7 +279,7 @@ class PayloadFreshnessTests(unittest.TestCase):
                                    protocol=2, once=True)
             config = MonitorConfig.load(root / "monitor.toml", environ={})
             with patch.object(session_daemon, "fetch_id_list", return_value=set()), \
-                 patch.object(session_daemon, "post_sessions", return_value=True) as posted, \
+                 patch.object(session_daemon, "post_sessions", return_value=200) as posted, \
                  patch.object(session_daemon, "hook_warnings", return_value=[]):
                 self.assertEqual(0, session_daemon.run(args, config))
         self.assertEqual("monitor-ai.local", posted.call_args.args[1]["device_id"])
@@ -361,7 +361,7 @@ class PayloadFreshnessTests(unittest.TestCase):
             session_daemon.MONITOR_API_TOKEN = legacy_token
             output = io.StringIO()
             try:
-                with patch.object(session_daemon, "post_sessions", return_value=True), \
+                with patch.object(session_daemon, "post_sessions", return_value=200), \
                      patch.object(session_daemon, "hook_warnings", return_value=[]), \
                      patch.object(session_daemon.urllib.request, "urlopen", side_effect=receive), \
                      redirect_stdout(output):
