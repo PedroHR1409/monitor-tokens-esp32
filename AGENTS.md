@@ -34,11 +34,16 @@ Testes rodam com `pytest` **ou** `python -m unittest discover -s tests -v`.
 
 ## Estrutura
 
-- `src/` + `include/` — firmware (PlatformIO, env `esp32-s3-3v5-lcd`)
-- `tools/` — daemon, hooks, CLI (`monitor.py`), protocolo, serviço
+- `src/` — firmware por camada: `ui/` (LVGL, ícones), `drivers/` (display, touch,
+  relógio), `sessions/` (transporte HTTP, estado), `assets/` (PNGs de marca) e
+  `icons/` (`.c` gerados — não editar à mão); includes resolvem pelos `-Isrc/...`
+  no `platformio.ini`. Headers compartilhados em `include/`
+- `tools/` — daemon, hooks, CLI (`monitor.py`), protocolo, serviço; mapa completo
+  em `tools/README.md` (hooks têm caminho estável — não mover sem reinstalar)
 - `tests/` — pytest/unittest, fixtures em `tests/fixtures/`
 - `docs/SPEC.md` — fonte da verdade de design; `docs/superpowers/` — planos/specs
-  de evolução (SDD)
+  de evolução (SDD); `.superpowers/` — evidências de execução do SDD (locais por
+  padrão; versione relatório relevante com `git add -f`, como o task-6)
 - `monitor.toml` — config de runtime do daemon (gitignored; pode conter token)
 
 ## Ao terminar uma tarefa

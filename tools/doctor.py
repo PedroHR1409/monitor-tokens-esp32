@@ -12,6 +12,7 @@ import urllib.request
 from typing import Any, Mapping
 
 from monitor_config import MonitorConfig, config_path
+from opencode_sessions import db_path as opencode_default_db
 from session_hook import hook_health
 
 
@@ -101,6 +102,7 @@ def check_paths(fixture: Mapping[str, Any]) -> list[CheckResult]:
     paths = {
         "claude": Path.home() / ".claude" / "projects",
         "codex": Path.home() / ".codex" / "session_index.jsonl",
+        "opencode": opencode_default_db(),
     }
     results = []
     for provider, path in paths.items():
