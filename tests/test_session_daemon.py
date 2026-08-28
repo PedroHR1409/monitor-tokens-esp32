@@ -6,11 +6,14 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 
 import session_daemon
+import session_meta
 from session_hook import record_event
 
 
@@ -226,6 +229,44 @@ class PayloadFreshnessTests(unittest.TestCase):
         self.assertIsNone(session["ctxPct"])
         self.assertEqual({"value": None, "quality": "unknown", "unit": "percent"},
                          session["context"])
+
+    def test_default_v2_main_posts_series_payload_without_legacy_tokens_today(self):
+        """Reading a v1-only total after POST would crash the default v2 daemon loop."""
+        args = SimpleNamespace(host="device", port=80, interval=5.0,
+                               tz_offset=0.0, claude_dir="claude",
+                               codex_index="codex-index", max_sessions=6,
+                               protocol=2, once=True)
+        payload = {"sessions": [], "stats": {"usage": {
+            "series": [{"provider": "claude", "buckets": {}, "total": 0,
+                        "quality": "measured"}],
+            "active_12h": 0,
+        }}}
+        with patch.object(session_daemon, "parse_args", return_value=args), \
+             patch.object(session_daemon, "fetch_id_list", return_value=set()), \
+             patch.object(session_daemon, "build_payload_v2", return_value=payload), \
+             patch.object(session_daemon, "post_sessions", return_value=True) as posted, \
+             patch.object(session_daemon, "hook_warnings", return_value=[]):
+            session_daemon.main()
+        posted.assert_called_once()
+
+
+class CodexWindowTokenTests(unittest.TestCase):
+    def test_rollout_counter_reset_keeps_new_usage_inside_session_window(self):
+        """Clamping a negative cumulative delta would lose post-reset Codex usage."""
+        with tempfile.TemporaryDirectory() as tmp:
+            rollout = Path(tmp) / "rollout-reset.jsonl"
+            events = [
+                {"timestamp": (NOW - timedelta(hours=2)).isoformat(), "payload": {"info": {
+                    "total_token_usage": {"total_tokens": 100}}}},
+                {"timestamp": NOW.isoformat(), "payload": {"info": {
+                    "total_token_usage": {"total_tokens": 40}}}},
+            ]
+            rollout.write_text("".join(json.dumps(event) + "\n" for event in events),
+                               encoding="utf-8")
+            session_meta._meta_cache.clear()
+            with patch.object(session_meta, "_rollout_for", return_value=rollout):
+                meta = session_meta.codex_meta("reset-session", NOW - timedelta(hours=1))
+        self.assertEqual(40, meta["tokens"])
 
 
 if __name__ == "__main__":

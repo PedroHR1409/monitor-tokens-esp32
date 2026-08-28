@@ -148,7 +148,8 @@ def codex_meta(session_id: str, since=None) -> dict:
 
     model = cwd = effort = ""
     total_now = 0
-    total_before = None
+    total_window = 0
+    previous_total = None
     ctx_now = 0
     ctx_window = 0
 
@@ -185,8 +186,15 @@ def codex_meta(session_id: str, since=None) -> dict:
                     if isinstance(tu, dict) and tu.get("total_tokens") is not None:
                         total_now = int(tu["total_tokens"])
                         ts = parse_ts(obj.get("timestamp"))
-                        if since and ts and ts < since:
-                            total_before = total_now
+                        if since and ts:
+                            if ts < since:
+                                previous_total = total_now
+                            else:
+                                delta = (total_now if previous_total is None
+                                         or total_now < previous_total
+                                         else total_now - previous_total)
+                                total_window += max(delta, 0)
+                                previous_total = total_now
                     if info.get("model_context_window"):
                         ctx_window = int(info["model_context_window"])
                     # input_tokens do ULTIMO turno = tamanho do prompt = contexto vigente.
@@ -197,7 +205,7 @@ def codex_meta(session_id: str, since=None) -> dict:
     except OSError:
         return _codex_vazio()
 
-    tokens = total_now - total_before if total_before is not None else total_now
+    tokens = total_window if since else total_now
     context = context_measurement(ctx_now, measured_limit=ctx_window)
 
     out = {"model": model, "cwd": cwd, "effort": effort,

@@ -564,6 +564,16 @@ def format_summary(payload: dict) -> str:
     return ", ".join(parts) or "(nenhuma sessao)"
 
 
+def usage_total_for_log(usage: dict) -> int:
+    """Total diário para o log, sem exigir o campo legado de um payload v2."""
+    if "tokens_today" in usage:
+        return int(usage["tokens_today"] or 0)
+    series = usage.get("series")
+    if not isinstance(series, list):
+        return 0
+    return sum(int(item.get("total") or 0) for item in series if isinstance(item, dict))
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -614,6 +624,7 @@ def main() -> None:
                 device_id=device_id, daemon_instance_id=daemon_instance_id,
                 sequence=sequence, hidden=hidden, pinned=pinned)
             st = payload["stats"]["usage"]
+        today_tokens = usage_total_for_log(st)
         ok = post_sessions(url, payload)
 
         # So imprime quando o diagnostico MUDA: repetir o mesmo aviso a cada 5s vira
@@ -629,7 +640,7 @@ def main() -> None:
             datetime.now().strftime("%H:%M:%S"),
             "OK" if ok else "FALHOU",
             len(payload["sessions"]), st["active_12h"],
-            st["tokens_today"], format_summary(payload)))
+            today_tokens, format_summary(payload)))
 
         if args.once:
             break
