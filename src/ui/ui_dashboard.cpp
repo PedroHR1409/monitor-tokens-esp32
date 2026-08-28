@@ -395,6 +395,12 @@ void build_quota_cards(lv_obj_t *parent) {
                      &g_qCxTitle, &g_qCxValue, &g_qCxSub);
     lv_obj_t *rotCard = build_quota_card(parent, theme::QUOTA_CL_X, "claude",
                                          &g_qClTitle, &g_qClValue, &g_qClSub);
+    // Seta roxa = affordance de rotacao: o card e tocavel e cicla fontes. Sem a seta,
+    // a rotacao era um segredo que so quem leu o README descobria.
+    lv_obj_t *arrow = lv_label_create(rotCard);
+    lv_label_set_text(arrow, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(arrow, theme::color(theme::COLOR_STALE), 0);
+    lv_obj_align(arrow, LV_ALIGN_TOP_RIGHT, -2, 0);
     lv_obj_add_flag(rotCard, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(rotCard, quota_rot_cb, LV_EVENT_SHORT_CLICKED, nullptr);
 }
@@ -624,14 +630,12 @@ void update_quota_cards() {
     const bool clOk = usageStats.valid && q.claudeOk;
     const bool ocOk = usageStats.valid && q.opencodeOk;
     const bool cxRotOk = usageStats.valid && q.codexOk;
-    uint32_t rotColor = theme::COLOR_TEXT_DIM;
     switch (g_quotaRot) {
         case QUOTA_ROT_OPENCODE: {
             snprintf(title, sizeof(title), "opencode %uh", (unsigned)win);
             if (ocOk) {
                 format_tokens(q.opencodeTokens, value, sizeof(value));
                 snprintf(sub, sizeof(sub), "estimado");
-                rotColor = stale ? theme::COLOR_STALE : theme::COLOR_TEXT;
             } else {
                 snprintf(value, sizeof(value), "--");
                 snprintf(sub, sizeof(sub), "sem uso 5h");
@@ -652,7 +656,6 @@ void update_quota_cards() {
                 } else {
                     snprintf(sub, sizeof(sub), "oficial");
                 }
-                rotColor = quota_color(q.codexWeekPct, stale || aged);
             } else {
                 snprintf(value, sizeof(value), "--");
                 snprintf(sub, sizeof(sub), "sem rollout");
@@ -665,8 +668,6 @@ void update_quota_cards() {
                 if (q.claudePct > 0) snprintf(value, sizeof(value), "~%u%%", (unsigned)q.claudePct);
                 else                 format_tokens(q.claudeTokens, value, sizeof(value));
                 snprintf(sub, sizeof(sub), "estimado");
-                rotColor = (q.claudePct > 0) ? quota_color(q.claudePct, stale)
-                           : (stale ? theme::COLOR_STALE : theme::COLOR_TEXT);
             } else {
                 snprintf(value, sizeof(value), "--");
                 sub[0] = '\0';
@@ -677,7 +678,10 @@ void update_quota_cards() {
     set_text_if(g_qClTitle, g_cQClTitle, sizeof(g_cQClTitle), title);
     set_text_if(g_qClValue, g_cQClValue, sizeof(g_cQClValue), value);
     set_text_if(g_qClSub, g_cQClSub, sizeof(g_cQClSub), sub);
-    set_color_if(g_qClValue, g_cQClColor, rotColor, lv_obj_set_style_text_color);
+    // Valor sempre roxo: junto com a seta, marca o card como o rotativo. Perde os
+    // limiares amber/vermelho, mas o usuario escolheu a leitura unica de "este numero
+    // e uma escolha minha, giravel" sobre semaforo por limite.
+    set_color_if(g_qClValue, g_cQClColor, theme::COLOR_STALE, lv_obj_set_style_text_color);
 }
 
 void update_heatmap() {
