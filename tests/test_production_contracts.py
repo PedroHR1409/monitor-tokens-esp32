@@ -48,17 +48,17 @@ class ProductionContractsTests(unittest.TestCase):
         self.assertNotIn("-DMONITOR_DEMO_DATA=1", default_section)
 
     def test_runtime_logs_do_not_print_wifi_identifier(self):
-        transport = (ROOT / "src" / "session_transport.cpp").read_text(encoding="utf-8")
+        transport = (ROOT / "src" / "sessions" / "session_transport.cpp").read_text(encoding="utf-8")
         self.assertNotIn('WiFi \'%s\'', transport)
 
     def test_touch_callbacks_cache_rendered_ids_instead_of_trusting_slots(self):
-        ui = (ROOT / "src" / "ui_dashboard.cpp").read_text(encoding="utf-8")
+        ui = (ROOT / "src" / "ui" / "ui_dashboard.cpp").read_text(encoding="utf-8")
         self.assertIn("g_cardRenderedId", ui)
         self.assertIn("g_pickerRenderedId", ui)
         self.assertIn("find_session_by_id(selectedId)", ui)
 
     def test_mutating_http_routes_require_token_size_limit_and_payload_epoch(self):
-        transport = (ROOT / "src" / "session_transport.cpp").read_text(encoding="utf-8")
+        transport = (ROOT / "src" / "sessions" / "session_transport.cpp").read_text(encoding="utf-8")
         daemon = (ROOT / "tools" / "session_daemon.py").read_text(encoding="utf-8")
         self.assertIn("constant_time_token_match", transport)
         self.assertIn("HTTP_MAX_BODY_BYTES", transport)

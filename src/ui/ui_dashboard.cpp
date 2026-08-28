@@ -71,8 +71,18 @@ const char *label_for_state(SessionState s) {
     }
 }
 
-const lv_image_dsc_t *icon_for_tool(ToolType t) {
-    return (t == ToolType::CLAUDE) ? &claude_icon : &gpt_icon;
+// O provider (zai, deepseek...) vence quando presente; sem provider, o icone e o
+// classico da ferramenta. OpenCode sem provider conhecido usa o GPT como generico.
+const lv_image_dsc_t *icon_for_provider(const char *provider, ToolType t) {
+    if (provider && provider[0]) {
+        if (!strcmp(provider, "zai"))      return &zai_icon;
+        if (!strcmp(provider, "deepseek")) return &deepseek_icon;
+    }
+    switch (t) {
+        case ToolType::CLAUDE:   return &claude_icon;
+        case ToolType::OPENCODE: return &gpt_icon;
+        default:                 return &gpt_icon;
+    }
 }
 
 // Uma unidade so: 5s, 32s, 2m, 14m, 1h.
@@ -508,7 +518,7 @@ void update_session_card(int i) {
                  : ((s.state == SessionState::FREE && !blinking) ? 1 : 2), 0);
 
     // Icone: dessaturado quando a sessao esta ociosa, para as ativas saltarem.
-    const lv_image_dsc_t *ic = icon_for_tool(s.tool);
+    const lv_image_dsc_t *ic = icon_for_provider(s.provider, s.tool);
     if (c.cIcon != ic) { c.cIcon = ic; lv_image_set_src(c.icon, ic); }
     const bool dim = (s.state == SessionState::FREE) || s.stale;
     if (c.cIconDim != dim) {
@@ -735,7 +745,7 @@ void build_detail_screen(lv_obj_t *parent) {
 }
 
 void render_detail(const SessionData &s) {
-    lv_image_set_src(g_dtIcon, icon_for_tool(s.tool));
+    lv_image_set_src(g_dtIcon, icon_for_provider(s.provider, s.tool));
     lv_label_set_text(g_dtName, s.fullName[0] ? s.fullName : s.projectName);
 
     lv_label_set_text(g_dtState, s.stale ? "stale" : label_for_state(s.state));
@@ -745,7 +755,11 @@ void render_detail(const SessionData &s) {
     char buf[16];
     format_elapsed((millis() - s.stateStartedAtMillis) / 1000UL, buf, sizeof(buf));
     lv_label_set_text(g_dtElapsed, buf);
-    lv_label_set_text(g_dtTool, s.tool == ToolType::CLAUDE ? "Claude" : "Codex");
+    switch (s.tool) {
+        case ToolType::CLAUDE:   lv_label_set_text(g_dtTool, "Claude");   break;
+        case ToolType::OPENCODE: lv_label_set_text(g_dtTool, "OpenCode"); break;
+        default:                 lv_label_set_text(g_dtTool, "Codex");    break;
+    }
     lv_label_set_text(g_dtModel, s.model[0] ? s.model : "-");
     lv_label_set_text(g_dtEffort, s.effort[0] ? s.effort : "-");
     lv_label_set_text(g_dtBranch, s.branch[0] ? s.branch : "-");
@@ -871,7 +885,7 @@ void picker_open() {
             lv_obj_add_event_cb(row, picker_pick_cb, LV_EVENT_SHORT_CLICKED, &g_pickerSlot[i]);
 
             lv_obj_t *ic = lv_image_create(row);
-            lv_image_set_src(ic, icon_for_tool(catalog[i].tool));
+            lv_image_set_src(ic, icon_for_provider(catalog[i].provider, catalog[i].tool));
             lv_image_set_scale(ic, 128);            // 40px -> 20px
             lv_obj_align(ic, LV_ALIGN_LEFT_MID, -8, 0);
 

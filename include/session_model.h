@@ -4,7 +4,7 @@
 
 // Ver docs/SPEC.md secao 3.
 
-enum class ToolType : uint8_t { CLAUDE = 0, CODEX = 1, UNKNOWN = 2 };
+enum class ToolType : uint8_t { CLAUDE = 0, CODEX = 1, OPENCODE = 2, UNKNOWN = 3 };
 
 // Vocabulario fechado. Ver tools/session_state.py para como cada um e detectado.
 enum class SessionState : uint8_t {
@@ -28,6 +28,9 @@ struct SessionData {
     char         branch[22];        // git branch (detalhe)
     char         model[16];         // modelo em uso (detalhe)
     char         effort[10];        // nivel de esforco do turno (detalhe)
+    char         provider[12];      // dono do modelo: zai, deepseek, anthropic...
+                                    // decide o icone (ver icons.h); "" = cai no
+                                    // icone padrao da ferramenta
     uint32_t     tokensWindow;      // tokens desta sessao na janela (detalhe)
     uint16_t     ctxPct;            // % da janela de contexto ocupada; >= CTX_ALERT_PCT
                                     // faz o card piscar. 0 = desconhecido. Claude infere
@@ -55,6 +58,7 @@ struct SessionData {
 struct CatalogEntry {
     char     id[SESSION_ID_LEN];
     char     name[26];
+    char     provider[12];
     ToolType tool;
     SessionState state;
 };

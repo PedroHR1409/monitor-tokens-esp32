@@ -77,6 +77,7 @@ SessionState parse_state(const char *s) {
 ToolType parse_tool(const char *s) {
     if (!strcmp(s, "codex"))  return ToolType::CODEX;
     if (!strcmp(s, "claude")) return ToolType::CLAUDE;
+    if (!strcmp(s, "opencode")) return ToolType::OPENCODE;
     return ToolType::UNKNOWN;
 }
 
@@ -339,6 +340,8 @@ void handle_sessions_post() {
         s.model[sizeof(s.model) - 1] = '\0';
         strncpy(s.effort, obj["effort"] | "", sizeof(s.effort) - 1);
         s.effort[sizeof(s.effort) - 1] = '\0';
+        strncpy(s.provider, obj["provider"] | "", sizeof(s.provider) - 1);
+        s.provider[sizeof(s.provider) - 1] = '\0';
         s.tokensWindow = obj["tokensWin"] | 0UL;
         s.ctxPct       = obj["ctxPct"] | 0U;
 
@@ -365,6 +368,8 @@ void handle_sessions_post() {
         e.id[sizeof(e.id) - 1] = 0;
         strncpy(e.name, o["name"] | "?", sizeof(e.name) - 1);
         e.name[sizeof(e.name) - 1] = 0;
+        strncpy(e.provider, o["provider"] | "", sizeof(e.provider) - 1);
+        e.provider[sizeof(e.provider) - 1] = 0;
         e.tool  = parse_tool(o["tool"] | "");
         e.state = parse_state(o["state"] | "free");
         catalogCount++;

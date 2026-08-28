@@ -89,10 +89,14 @@ Regras:
     {"id": "sess-01", "project": "monitor-tokens-esp32", "tool": "claude", "state": "work", "elapsed": 12}
   ]}
   ```
-  `tool`: `"claude"` | `"codex"`. `state`: `"work"` | `"ask"` | `"perm"` | `"free"` (mapeados para
+  `tool`: `"claude"` | `"codex"` | `"opencode"`. `state`: `"work"` | `"ask"` | `"perm"` | `"free"` (mapeados para
   `SessionState` em `session_transport.cpp`). Slots não enviados numa atualização voltam a `occupied=false`
   (sessão encerrada no PC). `elapsed` é a idade em segundos calculada pelo daemon — o firmware não soma mais
   localmente em modo de dados reais, só exibe o último valor recebido (evita deriva de relógio entre PC e ESP32).
+- **Campo `provider` (opcional, por sessão)**: o dono do modelo (`"zai"`, `"deepseek"`, ...), preenchido
+  hoje só pelo coletor OpenCode. O firmware usa `provider` para escolher o ícone (GLM → Z.AI,
+  DeepSeek → DeepSeek) e cai no ícone clássico da ferramenta quando vem vazio — Claude/Codex
+  continuam sem o campo, então o contrato é retrocompatível (ver seção 6.2).
 - `GET /health` — heartbeat simples.
 - **Direção PC → ESP32**: `tools/session_daemon.py` (só biblioteca padrão do Python, sem `pip install`) faz
   *polling* — não há hooks instalados por padrão (ver justificativa abaixo) — a cada `--interval` segundos
@@ -264,21 +268,27 @@ uma celula.
 
 ## 6.2. Pipeline dos icones PNG
 
-Os PNGs originais do usuario (`src/claude.png` 447x447, `src/gpt.png` 555x552, ambos com
-fundo branco solido) passam por dois passos, ambos reproduziveis:
+Os PNGs originais do usuario ficam em `src/assets/` e os gerados em `src/icons/` (o `src/`
+raiz agora tem so codigo, organizado por camada: `src/ui/`, `src/drivers/`, `src/sessions/`;
+os includes resolvem pelos `-Isrc/...` no `platformio.ini`). O pipeline atual, todo stdlib:
 
-1. **Pre-processamento (PIL)**: color-key do branco para transparente, recorte no bounding
-   box do conteudo, resize com `LANCZOS` mantendo proporcao, centralizado num canvas
-   transparente de 40x40 (`ICON_SIZE`). O icone do GPT era preto (invisivel no fundo
-   escuro) e foi recolorido para branco preservando o canal alpha. Saida:
-   `src/claude_icon.png`, `src/gpt_icon.png`.
-2. **Conversao para LVGL**: `scripts/LVGLImage.py` — o conversor **oficial da propria
-   biblioteca**, que ja vem no pacote instalado (`.pio/libdeps/.../lvgl/scripts/`), em vez
-   de gerar o array C na mao (a struct `lv_image_dsc_t` tem campos de header/stride que
-   erram facil). Formato `ARGB8888`, saida em `src/icons/*.c`, declarados em `src/icons.h`.
-   Requer `pip install pypng lz4`.
+1. **Conversao direta**: `python tools/icon_convert.py src/assets/<marca>.png
+   src/icons/<marca>_icon.c` — decodificador PNG proprio (bit depth 8, types 2/3/6,
+   sem interlace), resize de media de area pre-multiplicada por alfa, centralizado num
+   canvas transparente de 40x40, saida no formato `lv_image_dsc_t` ARGB8888 (bytes
+   B,G,R,A por pixel) que a LVGLImage.py oficial produz.
+2. **Declaracao**: adicionar o `extern` em `src/ui/icons.h` e mapear o provider em
+   `icon_for_provider()` (`src/ui/ui_dashboard.cpp`).
 
-Trocar um icone = repetir os dois passos. Nada em `ui_dashboard.cpp` precisa mudar.
+Historico: os icones claude/gpt originais passaram por pre-processamento com PIL
+(color-key do branco, recorte, recolorida do GPT para branco) e depois pela
+`LVGLImage.py` oficial da LVGL; os `.c` gerados seguem em `src/icons/` sem precisar
+regenerar. Novos icones nao precisam desse passo — `icon_convert.py` ja trata
+transparencia nativa (o DeepSeek e o Z.AI entraram por aqui).
+
+O icone do card e escolhido pelo `provider` do modelo, nao pela ferramenta: GLM no
+OpenCode mostra a Z.AI (`zai`), DeepSeek mostra o logo da DeepSeek. Claude/Codex nao
+mandam provider e caem no icone classico.
 
 ## 7. Escopo do MVP (o que este código entrega)
 
