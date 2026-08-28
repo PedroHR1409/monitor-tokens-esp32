@@ -114,6 +114,43 @@ class DailyTotalTests(unittest.TestCase):
         self.assertEqual(4000, out["tokens_today"],
                          "mesma mensagem em dois arquivos continua sendo uma")
 
+    def test_codex_cumulative_rollout_totals_become_hourly_deltas(self):
+        """Summing cumulative Codex totals would count every earlier turn again."""
+        with TemporaryDirectory() as tmp:
+            rollouts = Path(tmp)
+            rollout = rollouts / "2026" / "08" / "27" / "rollout-1.jsonl"
+            rollout.parent.mkdir(parents=True)
+            events = [
+                {"timestamp": "2026-08-27T02:59:00Z", "payload": {"info": {
+                    "total_token_usage": {"total_tokens": 100}}}},
+                {"timestamp": "2026-08-27T14:00:00Z", "payload": {"info": {
+                    "total_token_usage": {"total_tokens": 140}}}},
+                {"timestamp": "2026-08-27T15:00:00Z", "payload": {"info": {
+                    "total_token_usage": {"total_tokens": 190}}}},
+            ]
+            rollout.write_text("".join(json.dumps(event) + "\n" for event in events),
+                               encoding="utf-8")
+            series = usage_tracker.codex_series(rollouts, TZ, NOW)
+        self.assertEqual("codex", series.provider)
+        self.assertEqual(90, series.total)
+        self.assertEqual(90, sum(series.buckets.values()))
+
+    def test_codex_counter_reset_starts_a_new_delta_without_losing_usage(self):
+        """Discarding a lower post-reset total would silently undercount a new Codex run."""
+        with TemporaryDirectory() as tmp:
+            rollouts = Path(tmp)
+            rollout = rollouts / "rollout-reset.jsonl"
+            events = [
+                {"timestamp": "2026-08-27T02:59:00Z", "payload": {"info": {
+                    "total_token_usage": {"total_tokens": 100}}}},
+                {"timestamp": "2026-08-27T15:00:00Z", "payload": {"info": {
+                    "total_token_usage": {"total_tokens": 40}}}},
+            ]
+            rollout.write_text("".join(json.dumps(event) + "\n" for event in events),
+                               encoding="utf-8")
+            series = usage_tracker.codex_series(rollouts, TZ, NOW)
+        self.assertEqual(40, series.total)
+
 
 class FiveHourEstimateTests(unittest.TestCase):
     def test_the_claude_estimate_counts_each_message_once(self):

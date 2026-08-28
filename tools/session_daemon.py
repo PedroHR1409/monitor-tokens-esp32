@@ -30,8 +30,8 @@ from session_state import (PERM_MARKER_MAX_AGE_S, conversational_events, infer_s
                            parse_ts, strip_accents)
 from agent_events import MAX_FUTURE_SKEW_S, reduce_session_events
 from session_hook import hook_health, load_event_store
-from session_meta import codex_meta, read_git_branch, context_usage
-from usage_tracker import collect as collect_usage, session_tokens
+from session_meta import CODEX_SESSIONS, codex_meta, read_git_branch, context_usage
+from usage_tracker import collect as collect_usage, collect_series, session_tokens
 from quota import collect as collect_quota
 from protocol_v2 import build_snapshot_v2
 
@@ -280,6 +280,7 @@ def scan_claude_sessions(projects_dir: Path, now: datetime,
         full = project_name_of(objs, folder, limit=FULL_NAME_MAX)
         branch, model, effort = meta_of(objs)
         tokens_win = session_tokens(path, now - timedelta(seconds=SESSION_TOKEN_WINDOW_S))
+        context = context_usage(objs)
         results.append({
             "id": session_id,
             "project": full,
@@ -288,7 +289,10 @@ def scan_claude_sessions(projects_dir: Path, now: datetime,
             "model": model,
             "effort": effort,
             "tokensWin": tokens_win,
-            "ctxPct": context_usage(objs)[2],
+            "ctxPct": context["pct"],
+            "context": {"value": context["pct"] if context["quality"] != "unknown" else None,
+                        "quality": context["quality"], "unit": "percent"},
+            "context_tokens": context["tokens"],
             "tool": "claude",
             "state": state,
             "elapsed": int(age) if age != float("inf") else 0,
@@ -342,6 +346,7 @@ def scan_codex_sessions(index_path: Path, now: datetime,
         # O indice do Codex so tem id/nome/updated_at; modelo, effort, cwd e uso de
         # tokens estao no rollout da sessao, que casa pelo id.
         cx = codex_meta(tid, token_since)
+        context = cx["context"]
         out.append({
             "id": tid,
             "project": full,
@@ -351,6 +356,9 @@ def scan_codex_sessions(index_path: Path, now: datetime,
             "effort": strip_accents(cx["effort"])[:8],
             "tokensWin": cx["tokens"],
             "ctxPct": cx["ctx_pct"],
+            "context": {"value": context["pct"] if context["quality"] != "unknown" else None,
+                        "quality": context["quality"], "unit": "percent"},
+            "context_tokens": context["tokens"],
             "tool": "codex",
             "state": state,
             "elapsed": state_age,
@@ -521,7 +529,13 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
     v1 = build_payload_v1(claude_dir, codex_index, max_sessions, tz, generated,
                           hidden=hidden, pinned=pinned)
     legacy_stats = v1["stats"]
-    usage = {name: value for name, value in legacy_stats.items() if name != "quota"}
+    series = collect_series(claude_dir, CODEX_SESSIONS, tz, generated)
+    usage = {"series": [{"provider": item.provider, "buckets": dict(item.buckets),
+                           "total": item.total, "quality": item.quality}
+                          for item in series],
+             "active_12h": legacy_stats["active_12h"],
+             "token_window_h": legacy_stats["token_window_h"],
+             "total_sessions": legacy_stats["total_sessions"]}
     return build_snapshot_v2(
         sessions=v1["sessions"], catalog=v1["catalog"], usage=usage,
         quota=legacy_stats["quota"], health=hook_health(), node_id=node_id,

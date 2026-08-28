@@ -18,10 +18,12 @@ Por que existe um modulo so para isso:
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
 from session_state import parse_ts
+from usage_model import context_measurement
 
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 ROLLOUT_HEAD_BYTES = 96 * 1024   # model/cwd ficam no comeco do arquivo
@@ -107,7 +109,9 @@ def _rollout_for(session_id: str) -> Path | None:
 
 
 def _codex_vazio() -> dict:
-    return {"model": "", "cwd": "", "effort": "", "tokens": 0, "ctx_pct": 0}
+    context = context_measurement(0)
+    return {"model": "", "cwd": "", "effort": "", "tokens": 0,
+            "ctx_pct": context["pct"], "context": context}
 
 
 def codex_meta(session_id: str, since=None) -> dict:
@@ -194,10 +198,10 @@ def codex_meta(session_id: str, since=None) -> dict:
         return _codex_vazio()
 
     tokens = total_now - total_before if total_before is not None else total_now
-    ctx_pct = min(999, round(100 * ctx_now / ctx_window)) if (ctx_now and ctx_window) else 0
+    context = context_measurement(ctx_now, measured_limit=ctx_window)
 
     out = {"model": model, "cwd": cwd, "effort": effort,
-           "tokens": max(tokens, 0), "ctx_pct": ctx_pct}
+           "tokens": max(tokens, 0), "ctx_pct": context["pct"], "context": context}
     if len(_meta_cache) > 64:
         _meta_cache.clear()
     _meta_cache[key] = out
@@ -216,9 +220,6 @@ def codex_meta(session_id: str, since=None) -> dict:
 # grava `compactMetadata` com {"trigger":"auto","preTokens":N} — N e o teto real
 # daquela sessao. Gatilhos medidos aqui: 1.003.479, 1.002.810, 647.702 e 301.596;
 # como variam, o valor e aprendido POR SESSAO em vez de assumido global.
-CONTEXT_WINDOW_DEFAULT = 1_000_000   # usado enquanto a sessao nao revelou seu teto
-CONTEXT_WINDOW_SMALL   = 200_000     # janela padrao, para quem nao usa o modo 1M
-CONTEXT_ALERT_PCT      = 80          # a partir daqui o card pisca em vermelho
 
 
 def _ctx_of(obj: dict) -> int:
@@ -231,8 +232,16 @@ def _ctx_of(obj: dict) -> int:
             + int(u.get("cache_creation_input_tokens") or 0))
 
 
-def context_usage(objs: list) -> tuple:
-    """(tokens_agora, janela, pct) da sessao. pct=0 se nao der para saber."""
+def _configured_context_window() -> int:
+    """Limite Claude declarado pelo operador, sem aceitar valores inválidos."""
+    try:
+        return max(int(os.environ.get("MONITOR_CLAUDE_CONTEXT_WINDOW", "") or 0), 0)
+    except ValueError:
+        return 0
+
+
+def context_usage(objs: list) -> dict:
+    """Contexto Claude com tokens brutos e qualidade explícita do denominador."""
     atual = 0
     pico = 0
     teto_medido = 0
@@ -247,15 +256,8 @@ def context_usage(objs: list) -> tuple:
             if pre > 0:
                 teto_medido = max(teto_medido, pre)
 
-    # O teto medido so vale se for COERENTE com o historico: uma sessao que ja chegou a
-    # 918.882 tokens nao pode ter janela de 647.702. Quando a evidencia se contradiz
-    # (compactacao antiga, modelo trocado no meio), cai para a janela padrao pelo pico.
-    if teto_medido and teto_medido >= pico:
-        janela = teto_medido
-    elif pico > CONTEXT_WINDOW_SMALL:
-        janela = CONTEXT_WINDOW_DEFAULT           # ja passou de 200k => so pode ser 1M
-    else:
-        janela = CONTEXT_WINDOW_DEFAULT
-    if atual <= 0 or janela <= 0:
-        return 0, janela, 0
-    return atual, janela, min(999, round(100 * atual / janela))
+    # Um limite de compactação contraditório é histórico, não uma medida da janela
+    # atual; nesse caso só uma configuração explícita pode produzir uma porcentagem.
+    medido = teto_medido if teto_medido >= pico else 0
+    return context_measurement(atual, measured_limit=medido,
+                               configured_limit=_configured_context_window())

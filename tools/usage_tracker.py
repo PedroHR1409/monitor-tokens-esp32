@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from session_state import parse_ts
+from usage_model import UsageSeries, combine_usage
 
 CHUNK = 256 * 1024      # bloco de leitura reversa
 MAX_BACK = 8 * 1024 * 1024   # teto por arquivo, evita varrer um transcript gigante
@@ -165,6 +166,105 @@ def collect(projects_dir: Path, tz: timezone,
 
     return {"tokens_today": total, "spark": buckets, "models": models,
             "spark_end_hour": spark_base.hour}
+
+
+def _spark_hours(tz: timezone, now: datetime) -> tuple[datetime, list[str]]:
+    """Inícios dos mesmos 12 baldes usados pela tela, em formato estável."""
+    base = now.astimezone(tz).replace(minute=0, second=0, microsecond=0)
+    start = base - timedelta(hours=SPARK_HOURS - 1)
+    return start, [(start + timedelta(hours=index)).isoformat()
+                   for index in range(SPARK_HOURS)]
+
+
+def claude_series(projects_dir: Path, tz: timezone,
+                  now: datetime | None = None) -> UsageSeries:
+    """Uso Claude com a sua proveniência, sem o chamar de uso combinado."""
+    observed = now or datetime.now(timezone.utc)
+    legacy = collect(projects_dir, tz, observed)
+    _, hours = _spark_hours(tz, observed)
+    return UsageSeries("claude", dict(zip(hours, legacy["spark"])),
+                       legacy["tokens_today"], "measured")
+
+
+def _rollout_total_events(path: Path):
+    """Pares (timestamp, total acumulado) que o rollout do Codex publica."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = obj.get("payload")
+                info = payload.get("info") if isinstance(payload, dict) else None
+                usage = info.get("total_token_usage") if isinstance(info, dict) else None
+                if not isinstance(usage, dict) or usage.get("total_tokens") is None:
+                    continue
+                timestamp = parse_ts(obj.get("timestamp"))
+                if timestamp is None:
+                    continue
+                try:
+                    yield timestamp, max(int(usage["total_tokens"]), 0)
+                except (TypeError, ValueError):
+                    continue
+    except OSError:
+        return
+
+
+def codex_series(rollouts_dir: Path, tz: timezone,
+                 now: datetime | None = None) -> UsageSeries | None:
+    """Converte contadores acumulados dos rollouts Codex em deltas diários/horários."""
+    if not rollouts_dir.is_dir():
+        return None
+    observed = now or datetime.now(timezone.utc)
+    start = day_start(tz, observed)
+    start_epoch = start.timestamp()
+    spark_start, hours = _spark_hours(tz, observed)
+    buckets = {hour: 0 for hour in hours}
+    total = 0
+    found = False
+    try:
+        rollouts = rollouts_dir.rglob("rollout-*.jsonl")
+        for path in rollouts:
+            try:
+                if path.stat().st_mtime < start_epoch:
+                    continue
+            except OSError:
+                continue
+            events = sorted(_rollout_total_events(path), key=lambda item: item[0])
+            if not events:
+                continue
+            found = True
+            previous = None
+            for timestamp, cumulative in events:
+                if timestamp < start:
+                    previous = cumulative
+                    continue
+                # Um contador menor indica reinício do rollout; o novo acumulado ainda
+                # é uso real desta janela, não um delta negativo a descartar.
+                delta = (cumulative if previous is None or cumulative < previous
+                         else cumulative - previous)
+                previous = cumulative
+                total += delta
+                local = timestamp.astimezone(tz)
+                if local >= spark_start:
+                    index = int((local - spark_start).total_seconds() // 3600)
+                    if 0 <= index < SPARK_HOURS:
+                        buckets[hours[index]] += delta
+    except OSError:
+        return None
+    if not found:
+        return None
+    return UsageSeries("codex", buckets, total, "measured")
+
+
+def collect_series(projects_dir: Path, rollouts_dir: Path, tz: timezone,
+                   now: datetime | None = None) -> tuple[UsageSeries, ...]:
+    """Séries visíveis ao daemon; só combina fontes com os mesmos baldes horários."""
+    observed = now or datetime.now(timezone.utc)
+    claude = claude_series(projects_dir, tz, observed)
+    codex = codex_series(rollouts_dir, tz, observed)
+    return combine_usage(claude, *(item for item in (codex,) if item is not None))
 
 
 # Cache por (arquivo, tamanho): recalcular a soma de 24h de um transcript de varios MB a
