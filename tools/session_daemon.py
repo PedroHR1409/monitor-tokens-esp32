@@ -84,10 +84,12 @@ MONITOR_API_TOKEN = load_monitor_api_token()
 
 
 def authenticated_request(url: str, *, data: bytes | None = None,
-                          method: str = "GET", headers: dict | None = None):
+                          method: str = "GET", headers: dict | None = None,
+                          token: str | None = None):
     request_headers = dict(headers or {})
-    if MONITOR_API_TOKEN:
-        request_headers["X-Monitor-Token"] = MONITOR_API_TOKEN
+    effective_token = MONITOR_API_TOKEN if token is None else token
+    if effective_token:
+        request_headers["X-Monitor-Token"] = effective_token
     return urllib.request.Request(url, data=data, method=method, headers=request_headers)
 
 
@@ -545,10 +547,11 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
     )
 
 
-def post_sessions(url: str, payload: dict, timeout: float = 5.0) -> bool:
+def post_sessions(url: str, payload: dict, timeout: float = 5.0,
+                  token: str | None = None) -> bool:
     body = json.dumps(payload).encode("utf-8")
     req = authenticated_request(url, data=body, method="POST",
-                                headers={"Content-Type": "application/json"})
+                                headers={"Content-Type": "application/json"}, token=token)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return 200 <= resp.status < 300
@@ -608,7 +611,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
     tz = timezone(timedelta(hours=args.tz_offset))
     claude_dir, codex_index = Path(args.claude_dir), Path(args.codex_index)
     node_id = os.environ.get("MONITOR_NODE_ID", "").strip() or os.environ.get("COMPUTERNAME", "monitor")
-    device_id = os.environ.get("MONITOR_DEVICE_ID", "").strip() or args.host
+    device_id = os.environ.get("MONITOR_DEVICE_ID", "").strip() or host
+    transport_token = config.transport.api_token or MONITOR_API_TOKEN
     daemon_instance_id = "{}-{}".format(node_id, uuid.uuid4().hex)
     sequence = 0
 
@@ -634,7 +638,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                 sequence=sequence, hidden=hidden, pinned=pinned)
             st = payload["stats"]["usage"]
         today_tokens = usage_total_for_log(st)
-        ok = post_sessions(url, payload)
+        ok = post_sessions(url, payload, timeout=config.transport.timeout_s,
+                           token=transport_token)
 
         # So imprime quando o diagnostico MUDA: repetir o mesmo aviso a cada 5s vira
         # ruido e o operador para de ler justamente a linha que importa.

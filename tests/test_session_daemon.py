@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from contextlib import redirect_stdout
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
@@ -266,6 +268,57 @@ class PayloadFreshnessTests(unittest.TestCase):
              patch.object(session_daemon, "hook_warnings", return_value=[]):
             self.assertEqual(0, session_daemon.run(args, config))
         self.assertTrue(posted.call_args.args[0].startswith("http://monitor-ai.local:80/"))
+
+    def test_run_uses_resolved_host_as_v2_device_id_without_mocking_the_builder(self):
+        """Passing args.host=None into v2 would reject the unified CLI defaults."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = SimpleNamespace(host=None, port=None, interval=None,
+                                   tz_offset=0.0, claude_dir=str(root / "claude"),
+                                   codex_index=str(root / "codex-index"), max_sessions=6,
+                                   protocol=2, once=True)
+            config = MonitorConfig.load(root / "monitor.toml", environ={})
+            with patch.object(session_daemon, "fetch_id_list", return_value=set()), \
+                 patch.object(session_daemon, "post_sessions", return_value=True) as posted, \
+                 patch.object(session_daemon, "hook_warnings", return_value=[]):
+                self.assertEqual(0, session_daemon.run(args, config))
+        self.assertEqual("monitor-ai.local", posted.call_args.args[1]["device_id"])
+
+    def test_run_posts_the_configured_token_without_logging_it(self):
+        """Ignoring config.transport.api_token would diagnose a credential then omit it on POST."""
+        configured_token = "config-token-header-only-123456"
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        captured = []
+        def receive(request, timeout):
+            captured.append(request)
+            return Response()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = SimpleNamespace(host="test-device", port=80, interval=1.0,
+                                   tz_offset=0.0, claude_dir=str(root / "claude"),
+                                   codex_index=str(root / "codex-index"), max_sessions=6,
+                                   protocol=1, once=True)
+            config = MonitorConfig.load(root / "monitor.toml", environ={
+                "MONITOR_API_TOKEN": configured_token,
+            })
+            output = io.StringIO()
+            with patch.object(session_daemon, "fetch_id_list", return_value=set()), \
+                 patch.object(session_daemon, "hook_warnings", return_value=[]), \
+                 patch.object(session_daemon.urllib.request, "urlopen", side_effect=receive), \
+                 redirect_stdout(output):
+                self.assertEqual(0, session_daemon.run(args, config))
+        self.assertEqual(configured_token, captured[0].get_header("X-monitor-token"))
+        self.assertNotIn(configured_token, output.getvalue())
 
 
 class CodexWindowTokenTests(unittest.TestCase):
