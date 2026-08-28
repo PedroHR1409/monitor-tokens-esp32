@@ -527,7 +527,7 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
                               if opencode_db is not None else 0)),
             "token_window_h": SESSION_TOKEN_WINDOW_H,
             "total_sessions": total,
-            "quota": collect_quota(claude_dir, now),
+            "quota": collect_quota(claude_dir, now, opencode_db=opencode_db),
         },
     }
 

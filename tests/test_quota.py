@@ -254,6 +254,35 @@ class QuotaBlockTests(unittest.TestCase):
         self.assertEqual(1_000, block["claude"]["tokens"])
         self.assertEqual(quota.CLAUDE_WINDOW_H, block["window_h"])
 
+    def test_opencode_block_is_estimated_and_gated_by_explicit_db(self):
+        """Sem caminho explicito o coletor NAO toca o banco real: hermetico por padrao."""
+        self.assertFalse(quota.collect(Path("/nao/existe"), NOW)["opencode"]["ok"])
+
+    def test_opencode_block_sums_tokens_inside_the_5h_window(self):
+        import sqlite3
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "opencode.db"
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, "
+                        "data TEXT, time_created INTEGER, time_updated INTEGER)")
+            data = json.dumps({"role": "assistant", "tokens": {
+                "input": 100, "output": 50, "reasoning": 0,
+                "cache": {"read": 900, "write": 10}}})
+            fresh = int((NOW - timedelta(minutes=30)).timestamp() * 1000)
+            stale = int((NOW - timedelta(hours=7)).timestamp() * 1000)
+            con.execute("INSERT INTO message VALUES (?,?,?,?,?)",
+                        ("m1", "s", data, fresh, fresh))
+            con.execute("INSERT INTO message VALUES (?,?,?,?,?)",
+                        ("m2", "s", data, stale, stale))
+            con.commit()
+            con.close()
+            block = quota.collect(Path("/nao/existe"), NOW, opencode_db=db)
+        self.assertTrue(block["opencode"]["ok"])
+        self.assertFalse(block["opencode"]["official"])
+        self.assertEqual(160, block["opencode"]["tokens"])   # 150 do turno fresco; fora da janela não conta
+        # cache.read nunca entra como consumo: input+output+reasoning+cache.write
+        self.assertNotEqual(160 + 900, block["opencode"]["tokens"])
+
 
 class PayloadContractTests(unittest.TestCase):
     def test_daemon_payload_carries_the_quota_block(self):

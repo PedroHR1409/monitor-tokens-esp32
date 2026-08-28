@@ -146,6 +146,10 @@ lv_obj_t *g_qClValue = nullptr, *g_qClSub = nullptr, *g_qClTitle = nullptr;
 char g_cQCxValue[8] = "", g_cQCxSub[14] = "", g_cQCxTitle[12] = "";
 char g_cQClValue[8] = "", g_cQClSub[14] = "", g_cQClTitle[12] = "";
 uint32_t g_cQCxColor = 0, g_cQClColor = 0;
+// Card de consumo rotativo: toque cicla claude -> opencode -> codex. 0-based no enum
+// local QUOTA_ROT_*; o valor sobrevive ao refresh porque update_quota_cards le dele.
+uint8_t g_quotaRot = 0;
+enum : uint8_t { QUOTA_ROT_CLAUDE = 0, QUOTA_ROT_OPENCODE = 1, QUOTA_ROT_CODEX = 2 };
 
 // Heatmap de 12 horas. Escolhido depois de medir o dado real: 10 dos 12 baldes sao
 // zero e o pico chega a 10x o menor valor nao-nulo. Uso de tokens e esparso e em
@@ -188,6 +192,8 @@ uint32_t g_cScreenBorder = 0;
 // Definidos mais abaixo (precisam de show_detail, que depende dos widgets do detalhe),
 // mas usados ja em build_session_card.
 void card_event_cb(lv_event_t *e);
+void update_quota_cards();
+void quota_rot_cb(lv_event_t *e);
 void picker_open();
 void picker_close_cb(lv_event_t *e);
 void picker_pick_cb(lv_event_t *e);
@@ -365,8 +371,8 @@ void build_tokens_card(lv_obj_t *parent) {
 // comparacao entre eles so funciona se a diferenca visivel for o conteudo, nao o
 // desenho. O que separa oficial de estimado e o rodape ("5h oficial" x "estimado") e o
 // til antes do numero do Claude.
-void build_quota_card(lv_obj_t *parent, int16_t x, const char *title,
-                      lv_obj_t **titleOut, lv_obj_t **valueOut, lv_obj_t **subOut) {
+lv_obj_t *build_quota_card(lv_obj_t *parent, int16_t x, const char *title,
+                           lv_obj_t **titleOut, lv_obj_t **valueOut, lv_obj_t **subOut) {
     lv_obj_t *card = make_card(parent, x, theme::ROW2_Y, theme::CELL, theme::CELL);
 
     lv_obj_t *cap = make_label(card, &lv_font_montserrat_14, theme::COLOR_TEXT_FAINT);
@@ -381,13 +387,25 @@ void build_quota_card(lv_obj_t *parent, int16_t x, const char *title,
     *subOut = make_label(card, &lv_font_montserrat_12, theme::COLOR_TEXT_FAINT);
     lv_label_set_text(*subOut, "");
     lv_obj_align(*subOut, LV_ALIGN_BOTTOM_MID, 0, 0);
+    return card;
 }
 
 void build_quota_cards(lv_obj_t *parent) {
     build_quota_card(parent, theme::QUOTA_CX_X, "codex",
                      &g_qCxTitle, &g_qCxValue, &g_qCxSub);
-    build_quota_card(parent, theme::QUOTA_CL_X, "claude",
-                     &g_qClTitle, &g_qClValue, &g_qClSub);
+    lv_obj_t *rotCard = build_quota_card(parent, theme::QUOTA_CL_X, "claude",
+                                         &g_qClTitle, &g_qClValue, &g_qClSub);
+    lv_obj_add_flag(rotCard, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(rotCard, quota_rot_cb, LV_EVENT_SHORT_CLICKED, nullptr);
+}
+
+// Toque no card de consumo cicla a fonte exibida. Callback precisa ficar no card
+// (nao nos labels), senao tocar no texto nao dispara — mesmo padrao dos cards de
+// sessao, que recebem o clique no container.
+void quota_rot_cb(lv_event_t *e) {
+    (void)e;
+    g_quotaRot = (g_quotaRot + 1) % 3;
+    update_quota_cards();
 }
 
 void build_heatmap_card(lv_obj_t *parent) {
@@ -599,30 +617,67 @@ void update_quota_cards() {
                  cxOk ? quota_color(q.codexH5Pct, stale || cxAged) : theme::COLOR_TEXT_DIM,
                  lv_obj_set_style_text_color);
 
-    // --- Claude: consumo, nunca cota ---
-    // O til e o rodape "estimado" existem porque o Claude NAO publica cota em disco.
-    // Com teto declarado (MONITOR_CLAUDE_5H_BUDGET) vira percentual; sem ele, mostra os
-    // tokens crus — que sao verdade — em vez de um percentual de denominador inventado.
+    // --- Card de consumo ROTATIVO (toque cicla claude -> opencode -> codex) ---
+    // Estimados mostram tokens crus (ou ~% com teto declarado, so Claude); o Codex
+    // entra aqui na janela SEMANAL oficial, que o card fixo ao lado nao cobre —
+    // assim a rotacao nao repete o mesmo numero duas vezes na tela.
     const bool clOk = usageStats.valid && q.claudeOk;
-    snprintf(title, sizeof(title), "claude %uh", (unsigned)win);
-    set_text_if(g_qClTitle, g_cQClTitle, sizeof(g_cQClTitle), title);
-
-    if (clOk) {
-        if (q.claudePct > 0) snprintf(value, sizeof(value), "~%u%%", (unsigned)q.claudePct);
-        else                 format_tokens(q.claudeTokens, value, sizeof(value));
-        snprintf(sub, sizeof(sub), "estimado");
-    } else {
-        snprintf(value, sizeof(value), "--");
-        sub[0] = '\0';
+    const bool ocOk = usageStats.valid && q.opencodeOk;
+    const bool cxRotOk = usageStats.valid && q.codexOk;
+    uint32_t rotColor = theme::COLOR_TEXT_DIM;
+    switch (g_quotaRot) {
+        case QUOTA_ROT_OPENCODE: {
+            snprintf(title, sizeof(title), "opencode %uh", (unsigned)win);
+            if (ocOk) {
+                format_tokens(q.opencodeTokens, value, sizeof(value));
+                snprintf(sub, sizeof(sub), "estimado");
+                rotColor = stale ? theme::COLOR_STALE : theme::COLOR_TEXT;
+            } else {
+                snprintf(value, sizeof(value), "--");
+                snprintf(sub, sizeof(sub), "sem uso 5h");
+            }
+            break;
+        }
+        case QUOTA_ROT_CODEX: {
+            snprintf(title, sizeof(title), "codex sem");
+            if (cxRotOk) {
+                snprintf(value, sizeof(value), "%u%%", (unsigned)q.codexWeekPct);
+                // Mesma regra de frescor do card fixo: numero oficial parado e um
+                // numero de outro dia; a idade no rodape evita a leitura errada.
+                const bool aged = q.codexAgeS > theme::QUOTA_FRESH_S;
+                if (aged) {
+                    char idade[8];
+                    format_elapsed(q.codexAgeS, idade, sizeof(idade));
+                    snprintf(sub, sizeof(sub), "ha %s", idade);
+                } else {
+                    snprintf(sub, sizeof(sub), "oficial");
+                }
+                rotColor = quota_color(q.codexWeekPct, stale || aged);
+            } else {
+                snprintf(value, sizeof(value), "--");
+                snprintf(sub, sizeof(sub), "sem rollout");
+            }
+            break;
+        }
+        default: {  // QUOTA_ROT_CLAUDE
+            snprintf(title, sizeof(title), "claude %uh", (unsigned)win);
+            if (clOk) {
+                if (q.claudePct > 0) snprintf(value, sizeof(value), "~%u%%", (unsigned)q.claudePct);
+                else                 format_tokens(q.claudeTokens, value, sizeof(value));
+                snprintf(sub, sizeof(sub), "estimado");
+                rotColor = (q.claudePct > 0) ? quota_color(q.claudePct, stale)
+                           : (stale ? theme::COLOR_STALE : theme::COLOR_TEXT);
+            } else {
+                snprintf(value, sizeof(value), "--");
+                sub[0] = '\0';
+            }
+            break;
+        }
     }
+    set_text_if(g_qClTitle, g_cQClTitle, sizeof(g_cQClTitle), title);
     set_text_if(g_qClValue, g_cQClValue, sizeof(g_cQClValue), value);
     set_text_if(g_qClSub, g_cQClSub, sizeof(g_cQClSub), sub);
-    // Sem teto declarado nao ha limiar para colorir: um numero de tokens nao tem "80%".
-    // Ele ainda fica roxo se estiver velho — stale vale para os dois formatos.
-    uint32_t clColor = theme::COLOR_TEXT_DIM;
-    if (clOk && q.claudePct > 0) clColor = quota_color(q.claudePct, stale);
-    else if (clOk && stale)      clColor = theme::COLOR_STALE;
-    set_color_if(g_qClValue, g_cQClColor, clColor, lv_obj_set_style_text_color);
+    set_color_if(g_qClValue, g_cQClColor, rotColor, lv_obj_set_style_text_color);
 }
 
 void update_heatmap() {

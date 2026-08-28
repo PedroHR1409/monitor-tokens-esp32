@@ -413,6 +413,11 @@ void handle_sessions_post() {
                 q.claudeTokens = cl["tokens"] | 0UL;
                 q.claudePct    = cl["pct"]    | 0;
             }
+            JsonObject oc = qt["opencode"].as<JsonObject>();
+            if (!oc.isNull()) {
+                q.opencodeOk     = oc["ok"] | false;
+                q.opencodeTokens = oc["tokens"] | 0UL;
+            }
         }
 
         usageStats.valid = true;

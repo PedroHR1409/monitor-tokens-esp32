@@ -86,6 +86,8 @@ struct QuotaStats {
     bool     claudeOk;
     uint32_t claudeTokens;    // tokens na janela de 5h — ESTIMATIVA de consumo
     uint16_t claudePct;       // 0 = sem teto declarado -> a tela mostra tokens
+    bool     opencodeOk;      // tokens 5h do OpenCode — ESTIMATIVA (sem cota oficial)
+    uint32_t opencodeTokens;
     uint8_t  windowH;         // horas da janela; o rotulo sai daqui para nunca mentir
 };
 

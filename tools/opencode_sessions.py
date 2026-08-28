@@ -176,6 +176,18 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
     return out
 
 
+def window_tokens(database: Path | None, since_epoch: float | None = None) -> int:
+    """Consumo (input+output+reasoning+cache.write) do OpenCode desde `since_epoch`.
+
+    Mesma semantica do tokensWin por sessao, mas agregado — alimenta o card
+    rotativo de consumo 5h. `database=None` cai no banco do usuario."""
+    messages = _rows(database if database is not None else db_path(),
+                     "SELECT data, time_created FROM message WHERE time_created >= ?",
+                     (0 if since_epoch is None else int(since_epoch * 1000),))
+    total, _ = _message_totals(messages, None)
+    return total
+
+
 def count_active_12h(database: Path | None, now: datetime, window_s: float) -> int:
     """Sessoes do OpenCode com mensagem na janela; espelha count_active_12h."""
     cutoff = now - timedelta(seconds=window_s)

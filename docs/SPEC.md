@@ -562,9 +562,25 @@ verificado e nao tem `model` em nenhuma das 1254 linhas.
 ## 15. Cota de uso: um numero oficial e um estimado (fase 7)
 
 O Pomodoro saiu do painel (nao era usado) e a faixa de 200x96 que ele ocupava virou
-DOIS cards de 96x96: cota do Codex e cota do Claude. A divisao nao e estetica — os
-dois numeros tem procedencias diferentes e separa-los fisicamente carrega essa
-diferenca melhor do que um rotulo miudo dentro de um card unico.
+DOIS cards de 96x96: cota do Codex (fixo, oficial) e um card de consumo ROTATIVO.
+A divisao nao e estetica — os numeros tem procedencias diferentes e separa-los
+fisicamente carrega essa diferenca melhor do que um rotulo miudo dentro de um card unico.
+
+### Card rotativo de consumo (toque cicla)
+
+Com o OpenCode entrando como terceira fonte (e sem cota de servidor propria), o segundo
+card passou a ciclar por TOQUE: `claude -> opencode -> codex`. Conteudo por slot:
+
+- **claude 5h** — consumo estimado dos transcripts (tokens crus, ou ~% com teto
+  declarado). Rodape "estimado".
+- **opencode 5h** — consumo dos turnos do `opencode.db` na janela (input+output+
+  reasoning+cache.write; cache.read e re-leitura, nao consumo). Rodape "estimado".
+- **codex sem** — a janela SEMANAL oficial do Codex, que o card fixo (5h) nao cobre
+  como numero principal. Rodape "oficial", ou "ha X" quando a leitura envelheceu
+  (mesma regra de frescor do card fixo).
+
+O estado da rotacao sobrevive ao refresh (variavel de modulo, nao do payload) — o
+toque e escolha do operador, nao dado do daemon.
 
 ### Codex: oficial
 
