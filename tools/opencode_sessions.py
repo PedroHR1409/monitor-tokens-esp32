@@ -252,12 +252,14 @@ def session_structured_states(database: Path | None, since: datetime) -> dict[st
         state = ((part.get("state") or {}).get("status") or "")
         tool = part.get("tool") or ""
         signal = None
-        # "pending" NAO e perm: e estado de pipeline (tool criada antes de executar
-        # e atualizada in-place segundos depois) — mapear para perm gerava falso
-        # positivo durante trabalho normal (medido 31/08). E o pedido de PERMISSAO
+        # "pending" NAO e perm nas tools em geral: e estado de pipeline (tool criada
+        # antes de executar e atualizada in-place segundos depois) — mapear para perm
+        # gerava falso positivo durante trabalho normal (medido 31/08). EXCECAO: a
+        # tool `question` em pending/running = pergunta aberta aguardando resposta
+        # (estado `ask`, validado ao vivo nos dois estados). E o pedido de PERMISSAO
         # do OpenCode nao e persistido no SQLite (tabela permission vazia) — perm
         # fica indisponivel para esta fonte ate um sinal persistido existir.
-        if tool == "question" and state == "running":
+        if tool == "question" and state in ("pending", "running"):
             signal = "ask"
         # O ULTIMO tool part vence SEMPRE (sinal ou nao) — um running posterior
         # invalida um sinal anterior.

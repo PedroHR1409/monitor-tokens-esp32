@@ -292,6 +292,20 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
             sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
         self.assertEqual("work", sessions[0]["state"])
 
+    def test_question_pending_is_also_ask(self):
+        """Medido 31/08 13:15: a pergunta aberta fica `question | pending` (e nao
+        `running`) — ambos os estados sao ask."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-q2", NOW - timedelta(seconds=20)),
+            ], [])
+            self._write_part(db, "p1", "ses-q2",
+                             {"type": "tool", "tool": "question",
+                              "state": {"status": "pending"}},
+                             NOW - timedelta(seconds=10))
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        self.assertEqual("ask", sessions[0]["state"])
+
     def test_running_after_ask_keeps_ask(self):
         """O ULTIMO tool part vence: ask continua se a pergunta segue aberta."""
         with tempfile.TemporaryDirectory() as tmp:
