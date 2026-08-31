@@ -272,6 +272,40 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
             sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
         self.assertEqual("work", sessions[0]["state"])   # sessao ativa; sinal velho ignorado
 
+    def test_newer_running_tool_invalidates_old_pending(self):
+        """Bug medido 31/08: pending antigo sobrevivia e mostrava 'perm' com a
+        sessao trabalhando. O ULTIMO tool part (por time_updated) vence sempre."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-work", NOW - timedelta(seconds=20)),
+            ], [])
+            self._write_part(db, "p1", "ses-work",
+                             {"type": "tool", "tool": "edit",
+                              "state": {"status": "pending"}},
+                             NOW - timedelta(minutes=30))
+            self._write_part(db, "p2", "ses-work",
+                             {"type": "tool", "tool": "bash",
+                              "state": {"status": "running"}},
+                             NOW - timedelta(seconds=5))
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        self.assertEqual("work", sessions[0]["state"])
+
+    def test_perm_detected_when_pending_is_latest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-perm2", NOW - timedelta(seconds=20)),
+            ], [])
+            self._write_part(db, "p1", "ses-perm2",
+                             {"type": "tool", "tool": "bash",
+                              "state": {"status": "completed"}},
+                             NOW - timedelta(minutes=10))
+            self._write_part(db, "p2", "ses-perm2",
+                             {"type": "tool", "tool": "edit",
+                              "state": {"status": "pending"}},
+                             NOW - timedelta(seconds=10))
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        self.assertEqual("perm", sessions[0]["state"])
+
     def test_missing_database_returns_empty(self):
         self.assertEqual([], opencode_sessions.scan_opencode_sessions(
             NOW, database=Path("Z:/inexistentes/opencode.db")))

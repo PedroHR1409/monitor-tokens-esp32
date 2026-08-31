@@ -235,10 +235,13 @@ def session_structured_states(database: Path | None, since: datetime) -> dict[st
     (estado `ask`); uma tool "pending" aguarda autorizacao (estado `perm`). Depois
     da resposta/aprovacao o estado muda, entao o MAIS RECENTE tool part e o sinal.
     Devolve {session_id: (estado, time_created_em_epoch_s)}."""
+    # Partes sao ATUALIZADAS IN-PLACE (mesmo id: pending -> running -> completed).
+    # O estado real da sessao vem da parte com o maior time_updated — nunca de um
+    # pending antigo que sobreviveu no historico (falso "perm" medido em 31/08).
     rows = _rows(database if database is not None else db_path(),
-                 "SELECT session_id, data, time_created FROM part "
-                 "WHERE time_created >= ? AND json_extract(data, '$.type') = 'tool' "
-                 "ORDER BY time_created ASC",
+                 "SELECT session_id, data, time_updated FROM part "
+                 "WHERE time_updated >= ? AND json_extract(data, '$.type') = 'tool' "
+                 "ORDER BY time_updated ASC",
                  (int(since.timestamp() * 1000),))
     latest: dict[str, tuple[str, float]] = {}
     for row in rows:
@@ -253,9 +256,10 @@ def session_structured_states(database: Path | None, since: datetime) -> dict[st
             signal = "perm"
         elif tool == "question" and state == "running":
             signal = "ask"
-        if signal:
-            latest[row["session_id"]] = (signal, (row["time_created"] or 0) / 1000.0)
-    return latest
+        # O ULTIMO tool part vence SEMPRE (sinal ou nao) — um running posterior
+        # invalida um pending anterior.
+        latest[row["session_id"]] = (signal or "", (row["time_updated"] or 0) / 1000.0)
+    return {sid: value for sid, value in latest.items() if value[0]}
 
 
 def turn_token_events(database: Path | None, since: datetime | None = None):
