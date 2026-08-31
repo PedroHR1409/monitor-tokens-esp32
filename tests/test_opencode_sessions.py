@@ -203,6 +203,55 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
             sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
         self.assertEqual("fix-28796-ajustes", sessions[0]["project"])
 
+    def _write_part(self, db: Path, pid: str, sid: str, data: dict, ts: datetime) -> None:
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, "
+                    "message_id TEXT, session_id TEXT, data TEXT, "
+                    "time_created INTEGER, time_updated INTEGER)")
+        con.execute("INSERT INTO part VALUES (?,?,?,?,?,?)",
+                    (pid, "msg-x", sid, json.dumps(data),
+                     int(ts.timestamp() * 1000), int(ts.timestamp() * 1000)))
+        con.commit(); con.close()
+
+    def test_question_running_maps_to_ask(self):
+        """A tool `question` em running = aguardando resposta do usuario."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-ask", NOW - timedelta(seconds=20)),
+            ], [])
+            self._write_part(db, "p1", "ses-ask",
+                             {"type": "tool", "tool": "question",
+                              "state": {"status": "running"}},
+                             NOW - timedelta(seconds=15))
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        self.assertEqual("ask", sessions[0]["state"])
+
+    def test_pending_tool_maps_to_perm(self):
+        """Tool pending = aguardando autorizacao."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-perm", NOW - timedelta(seconds=20)),
+            ], [])
+            self._write_part(db, "p1", "ses-perm",
+                             {"type": "tool", "tool": "bash",
+                              "state": {"status": "pending"}},
+                             NOW - timedelta(seconds=15))
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        self.assertEqual("perm", sessions[0]["state"])
+
+    def test_stale_signal_falls_back_to_work(self):
+        """Sinal velho (> 1h) nao trava o card em ask/perm."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-old", NOW - timedelta(seconds=30)),
+            ], [])
+            self._write_part(db, "p1", "ses-old",
+                             {"type": "tool", "tool": "question",
+                              "state": {"status": "running"}},
+                             NOW - timedelta(hours=2))
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        self.assertEqual("work", sessions[0]["state"])   # sessao ativa; sinal velho ignorado
+
     def test_missing_database_returns_empty(self):
         self.assertEqual([], opencode_sessions.scan_opencode_sessions(
             NOW, database=Path("Z:/inexistentes/opencode.db")))

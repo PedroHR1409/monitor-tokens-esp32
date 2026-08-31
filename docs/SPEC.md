@@ -830,6 +830,10 @@ atribuida e a do inicio da resposta.
 - **Contexto OpenCode**: default **128k** (aproximacao para GLM/DeepSeek), override
   por `usage.opencode_context_window`. Qualidade da metrica: `estimated` no default,
   `measured` com config. ctxPct limitado a 100.
+- **Estados estruturados** (`session_structured_states`): o ULTIMO tool part da
+  sessao define o estado quando e um sinal — tool `pending` = `perm`; tool
+  `question` em `running` = `ask` (pergunta aguardando resposta). Sinais com mais
+  de 1h caem para work/free. Sem isso, OpenCode so mostrava work/free.
 - **Nomenclatura do card** (regra unica Claude/Codex/OpenCode, `session_display_name`):
   **branch** quando ela nao e `main`/`master`; **nome do projeto** quando e. Ex.:
   `fix-28796-ajustes` (worktree), `feat/27816-remover-monolitico` (repo principal em

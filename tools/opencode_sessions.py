@@ -27,6 +27,9 @@ DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
 FULL_NAME_MAX = 38
 SOURCE_STALE_AFTER_S = 300.0
+# Janela de busca dos sinais estruturados (ask/perm) e idade maxima do sinal.
+SIGNAL_WINDOW_S = 3600.0
+SIGNAL_MAX_AGE_S = 3600.0
 # Janela tipica dos modelos GLM/DeepSeek usados no OpenCode. E uma APROXIMACAO:
 # override por usage.opencode_context_window no monitor.toml.
 DEFAULT_CONTEXT_WINDOW = 128000
@@ -90,7 +93,8 @@ def _project_name(session: dict, branch: str) -> str:
     if not project:
         project = (strip_accents(str(session.get("title") or "")).strip()
                    or strip_accents(str(session.get("slug") or "opencode")))[:FULL_NAME_MAX]
-    return session_display_name(project, branch)[:FULL_NAME_MAX]
+    display = session_display_name(project, branch)[:FULL_NAME_MAX]
+    return display or "opencode"
 
 
 def _message_totals(messages: list[dict], since_epoch: float | None) -> tuple[int, int]:
@@ -133,6 +137,7 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
     db = database if database is not None else db_path()
     sessions = _rows(db, "SELECT * FROM session WHERE time_archived IS NULL "
                          "ORDER BY time_updated DESC")
+    signals = session_structured_states(db, now - timedelta(seconds=SIGNAL_WINDOW_S))
     if not sessions:
         return []
 
@@ -160,6 +165,15 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
         tokens_win, context_tokens = _message_totals(messages, since_epoch)
 
         state = "work" if age <= WORK_MAX_AGE_S else "free"
+        state_age = age
+        signal = signals.get(sid)
+        if signal:
+            signal_state, signal_created = signal
+            signal_age = max((now - datetime.fromtimestamp(signal_created, tz=timezone.utc))
+                             .total_seconds(), 0.0)
+            if signal_age <= SIGNAL_MAX_AGE_S:
+                state = signal_state
+                state_age = signal_age
         window = ctx_window if ctx_window > 0 else DEFAULT_CONTEXT_WINDOW
         ctx_quality = "measured" if ctx_window > 0 else "estimated"
         ctx_pct = (min(100, int(context_tokens * 100 / window))
@@ -181,9 +195,9 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
             "context_tokens": context_tokens,
             "tool": "opencode",
             "state": state,
-            "elapsed": int(age),        # firmware exige uint64 no JSON (422 senao)
-            "source_stale": age > SOURCE_STALE_AFTER_S and state == "work",
-            "source_age_s": int(age),
+            "elapsed": int(state_age),  # firmware exige uint64 no JSON (422 senao)
+            "source_stale": state == "work" and age > SOURCE_STALE_AFTER_S,
+            "source_age_s": int(state_age),
             "diagnostic": "" if ctx_window > 0 else "context_estimated",
             "_age": age,
         })
@@ -200,6 +214,36 @@ def window_tokens(database: Path | None, since_epoch: float | None = None) -> in
                      (0 if since_epoch is None else int(since_epoch * 1000),))
     total, _ = _message_totals(messages, None)
     return total
+
+
+def session_structured_states(database: Path | None, since: datetime) -> dict[str, tuple[str, float]]:
+    """Sinais estruturados de estado por sessao, do ULTIMO tool part de cada uma.
+
+    A pergunta ao usuario deixa a tool `question` em "running" ate ser respondida
+    (estado `ask`); uma tool "pending" aguarda autorizacao (estado `perm`). Depois
+    da resposta/aprovacao o estado muda, entao o MAIS RECENTE tool part e o sinal.
+    Devolve {session_id: (estado, time_created_em_epoch_s)}."""
+    rows = _rows(database if database is not None else db_path(),
+                 "SELECT session_id, data, time_created FROM part "
+                 "WHERE time_created >= ? AND json_extract(data, '$.type') = 'tool' "
+                 "ORDER BY time_created ASC",
+                 (int(since.timestamp() * 1000),))
+    latest: dict[str, tuple[str, float]] = {}
+    for row in rows:
+        try:
+            part = json.loads(row["data"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        state = ((part.get("state") or {}).get("status") or "")
+        tool = part.get("tool") or ""
+        signal = None
+        if state == "pending":
+            signal = "perm"
+        elif tool == "question" and state == "running":
+            signal = "ask"
+        if signal:
+            latest[row["session_id"]] = (signal, (row["time_created"] or 0) / 1000.0)
+    return latest
 
 
 def turn_token_events(database: Path | None, since: datetime | None = None):
