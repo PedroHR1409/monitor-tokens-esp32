@@ -161,17 +161,37 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
         self.assertEqual("monitor-tokens-esp32", by_id["ses-name"])
         self.assertEqual("Aula de revisao", by_id["ses-fb"])   # sem directory: title
 
-    def test_context_defaults_to_128k_and_clamps_at_100(self):
-        """AC: contexto OpenCode exibido por default (estimado), sem estourar 100%."""
+    def test_context_window_per_model_glm_is_1m(self):
+        """AC: 584k tokens de contexto exibidos como 58% -> janela do GLM ~ 1M."""
         with tempfile.TemporaryDirectory() as tmp:
             db = _write_db(Path(tmp) / "opencode.db", [
                 _session("ses-ctx", NOW - timedelta(seconds=30)),
             ], [_assistant("ses-ctx", NOW - timedelta(seconds=60),
-                           output=300000, cache_read=0)])
+                           output=295, input=1557, cache_read=582400)])
             sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
         session = sessions[0]
-        self.assertEqual(100, session["ctxPct"])          # 300k >> 128k: clamp
+        self.assertEqual(58, session["ctxPct"])           # 584k / 1M = 58%
         self.assertEqual("estimated", session["context"]["quality"])
+
+    def test_context_clamps_at_100_for_huge_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-huge", NOW - timedelta(seconds=30)),
+            ], [_assistant("ses-huge", NOW - timedelta(seconds=60),
+                           output=1200000, cache_read=0)])
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        self.assertEqual(100, sessions[0]["ctxPct"])      # 1,2M > 1M: clamp
+
+    def test_context_window_deepseek_uses_128k(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-ds", NOW - timedelta(seconds=30),
+                         model='{"id":"deepseek-v4-flash","providerID":"deepseek",'
+                               '"variant":"high"}'),
+            ], [_assistant("ses-ds", NOW - timedelta(seconds=60),
+                           output=300000, cache_read=0)])
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        self.assertEqual(100, sessions[0]["ctxPct"])      # 300k / 128k: clamp
 
     def test_context_override_respects_configured_window(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -182,7 +202,7 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
             sessions = opencode_sessions.scan_opencode_sessions(
                 NOW, database=db, ctx_window=600000)
         session = sessions[0]
-        self.assertEqual(50, session["ctxPct"])
+        self.assertEqual(50, session["ctxPct"])           # config vence a tabela
         self.assertEqual("measured", session["context"]["quality"])
 
     def test_worktree_session_name_is_its_branch(self):

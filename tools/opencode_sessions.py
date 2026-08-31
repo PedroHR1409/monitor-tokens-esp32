@@ -30,9 +30,21 @@ SOURCE_STALE_AFTER_S = 300.0
 # Janela de busca dos sinais estruturados (ask/perm) e idade maxima do sinal.
 SIGNAL_WINDOW_S = 3600.0
 SIGNAL_MAX_AGE_S = 3600.0
-# Janela tipica dos modelos GLM/DeepSeek usados no OpenCode. E uma APROXIMACAO:
-# override por usage.opencode_context_window no monitor.toml.
+# Janela de contexto POR MODELO (APROXIMACAO, validada contra o % do OpenCode:
+# 584k tokens exibidos como 58% -> glm-5.3-flash ~ 1M). Override por
+# usage.opencode_context_window no monitor.toml (vale para todas as sessoes).
 DEFAULT_CONTEXT_WINDOW = 128000
+MODEL_CONTEXT_WINDOWS = (("glm", 1000000), ("deepseek", 128000))
+
+
+def context_window_for(model_id: str, provider_id: str, configured: int) -> int:
+    """Janela de contexto: config explicita > tabela por modelo > default."""
+    if configured > 0:
+        return configured
+    for needle, window in MODEL_CONTEXT_WINDOWS:
+        if needle in (model_id or "").lower() or needle in (provider_id or "").lower():
+            return window
+    return DEFAULT_CONTEXT_WINDOW
 
 # providerID/modelID -> provedor do icone no firmware (src/assets/*_icon.png).
 PROVIDERS_BY_MODEL = (("glm", "zai"), ("deepseek", "deepseek"))
@@ -174,7 +186,7 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
             if signal_age <= SIGNAL_MAX_AGE_S:
                 state = signal_state
                 state_age = signal_age
-        window = ctx_window if ctx_window > 0 else DEFAULT_CONTEXT_WINDOW
+        window = context_window_for(model_id, provider_db, ctx_window)
         ctx_quality = "measured" if ctx_window > 0 else "estimated"
         ctx_pct = (min(100, int(context_tokens * 100 / window))
                    if window > 0 and context_tokens > 0 else 0)
