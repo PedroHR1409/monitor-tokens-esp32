@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO and project build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini', 'partitions.csv') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
+
+      - name: Install tooling (pytest)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Python compile check (compileall)
+        run: python -m compileall tools tests
+
+      - name: Unit tests (pytest)
+        run: python -m pytest tests/ -q
+
+      - name: Secret leak scan
+        run: python tools/check_secrets.py
+
+      - name: Build firmware (production)
+        run: pio run -e esp32-s3-3v5-lcd
+
+      - name: Build firmware (demo)
+        run: pio run -e esp32-s3-3v5-lcd-demo

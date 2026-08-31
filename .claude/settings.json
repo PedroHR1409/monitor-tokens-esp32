@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/*)",
+      "Bash(python -m unittest discover -s tests*)",
+      "Bash(python tools/check_secrets.py)",
+      "Bash(python tools/monitor.py*)",
+      "Bash(pio run*)",
+      "Bash(pio device monitor*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git add:*)",
+      "Bash(git commit*)"
+    ],
+    "deny": [
+      "Read(./include/secrets.h)",
+      "Read(./monitor.toml)",
+      "Bash(pio run -t upload*)",
+      "Bash(git push*)",
+      "Bash(git push --force*)"
+    ]
+  }
+}
