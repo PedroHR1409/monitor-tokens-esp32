@@ -10,7 +10,7 @@
 | **Date** | 2026-08-28 |
 | **Author** | design-agent |
 | **DEFINE** | [DEFINE_WIDGET_UNIFICADO_CONSUMO.md](./DEFINE_WIDGET_UNIFICADO_CONSUMO.md) |
-| **Status** | ✅ Complete (Built) |
+| **Status** | ✅ Shipped |
 | **Design Confidence** | 0,95 (KB `python`/`testing`/`shared` + agentes casados no manifest) |
 
 ---

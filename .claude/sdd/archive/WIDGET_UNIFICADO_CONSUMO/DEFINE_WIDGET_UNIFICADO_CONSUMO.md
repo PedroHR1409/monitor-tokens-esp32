@@ -11,7 +11,7 @@
 | **Feature** | WIDGET_UNIFICADO_CONSUMO |
 | **Date** | 2026-08-28 |
 | **Author** | define-agent |
-| **Status** | ✅ Complete (Designed) |
+| **Status** | ✅ Shipped |
 | **Clarity Score** | 15/15 |
 | **Input** | `BRAINSTORM_WIDGET_UNIFICADO_CONSUMO.md` (brainstorm_document, pré-validado) |
 
