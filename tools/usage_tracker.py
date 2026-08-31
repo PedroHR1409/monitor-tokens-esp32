@@ -279,7 +279,7 @@ def session_tokens(path: Path, since: datetime) -> int:
         st = path.stat()
     except OSError:
         return 0
-    key = (str(path), st.st_size, int(st.st_mtime))
+    key = (str(path), st.st_size, int(st.st_mtime), since.isoformat())
     hit = _session_cache.get(key)
     if hit is not None:
         return hit

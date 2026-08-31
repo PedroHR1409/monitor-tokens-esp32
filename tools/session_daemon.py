@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import sys
 import time
 import urllib.error
@@ -35,7 +36,9 @@ from usage_tracker import collect as collect_usage, collect_series, session_toke
 from quota import collect as collect_quota
 from opencode_sessions import (count_active_12h as count_opencode_12h,
                                db_path as opencode_default_db,
-                               scan_opencode_sessions)
+                               scan_opencode_sessions, window_tokens)
+import usage_history
+import usage_top
 from protocol_v2 import build_snapshot_v2
 from monitor_config import MonitorConfig
 
@@ -467,11 +470,14 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
                      tz: timezone, now: datetime | None = None,
                      hidden: set | None = None, pinned: set | None = None,
                      opencode_db: Path | None = None,
-                     opencode_ctx_window: int = 0) -> dict:
+                     opencode_ctx_window: int = 0,
+                     history_db: Path | None = None) -> dict:
     """Payload legÃ­vel pelo firmware v1 durante a migraÃ§Ã£o do protocolo.
 
     `opencode_db=None` desliga a coleta do OpenCode (tests hermeticos); o daemon
-    passa o caminho real (padrao do usuario ou --opencode-db)."""
+    passa o caminho real (padrao do usuario ou --opencode-db). `history_db=None`
+    desliga o historico diario pelos mesmos motivos; com caminho, o total do dia
+    (3 fontes) e persistido e `stats.history.daily` entra como campo aditivo."""
     now = now or datetime.now(timezone.utc)
     dismissed = load_dismissed()
     hidden = hidden or set()
@@ -513,23 +519,58 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
                 for s in catalogo[:CATALOG_MAX]]
 
     usage = collect_usage(claude_dir, tz, now)
+    stats = {
+        "tokens_today": usage["tokens_today"],
+        "spark": usage["spark"],
+        "spark_end_hour": usage["spark_end_hour"],
+        "active_12h": (count_active_12h(claude_dir, codex_index, now)
+                       + (count_opencode_12h(opencode_db, now, ACTIVE_WINDOW_S)
+                          if opencode_db is not None else 0)),
+        "token_window_h": SESSION_TOKEN_WINDOW_H,
+        "total_sessions": total,
+        "quota": collect_quota(claude_dir, now, opencode_db=opencode_db),
+    }
+    if history_db is not None:
+        stats["history"] = _record_daily_history(history_db, claude_dir, tz, now,
+                                                 usage["tokens_today"],
+                                                 opencode_db=opencode_db)
+        stats["usage"] = {"top": usage_top.build_cached(
+            claude_dir, codex_index, opencode_db, tz, now)}
     return {
         "generated_at": now.isoformat(),
         "generated_at_epoch": int(now.timestamp()),
         "sessions": top,
         "catalog": catalogo,
-        "stats": {
-            "tokens_today": usage["tokens_today"],
-            "spark": usage["spark"],
-            "spark_end_hour": usage["spark_end_hour"],
-            "active_12h": (count_active_12h(claude_dir, codex_index, now)
-                           + (count_opencode_12h(opencode_db, now, ACTIVE_WINDOW_S)
-                              if opencode_db is not None else 0)),
-            "token_window_h": SESSION_TOKEN_WINDOW_H,
-            "total_sessions": total,
-            "quota": collect_quota(claude_dir, now, opencode_db=opencode_db),
-        },
+        "stats": stats,
     }
+
+
+def _record_daily_history(history_db: Path, claude_dir: Path, tz: timezone,
+                          now: datetime, claude_today: int, *,
+                          opencode_db: Path | None) -> dict:
+    """Persiste o total do dia (3 fontes) e devolve o bloco stats.history.
+
+    Codex entra pelo mesmo diff acumulado do codex_series (total = janela do dia
+    local); OpenCode pelo window_tokens desde a meia-noite local. Backfill roda
+    so quando a tabela esta vazia (primeiro boot), INSERT OR IGNORE."""
+    from usage_tracker import codex_series
+
+    codex = codex_series(CODEX_SESSIONS, tz, now)
+    codex_today = codex.total if codex else 0
+    day_start = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    opencode_today = (window_tokens(opencode_db, day_start.timestamp())
+                      if opencode_db is not None else 0)
+    total_today = claude_today + codex_today + opencode_today
+
+    if usage_history.is_empty(history_db):
+        gravados = usage_history.backfill(
+            history_db, claude_dir=claude_dir, rollouts_dir=CODEX_SESSIONS,
+            opencode_db=opencode_db, tz=tz, now=now)
+        print(f"[daemon] backfill do historico: {len(gravados)} dias "
+              f"({sum(gravados.values()):,} tokens)", file=sys.stderr)
+    usage_history.record_today(history_db, total_today, tz, now)
+    usage_history.prune(history_db, tz=tz, now=now)
+    return {"daily": usage_history.daily_window(history_db, tz, now=now)}
 
 
 # Compatibilidade para integraÃ§Ãµes Python existentes; o daemon usa os builders versionados.
@@ -541,12 +582,14 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
                      daemon_instance_id: str, sequence: int,
                      now: datetime | None = None, hidden: set | None = None,
                      pinned: set | None = None, opencode_db: Path | None = None,
-                     opencode_ctx_window: int = 0) -> dict:
+                     opencode_ctx_window: int = 0,
+                     history_db: Path | None = None) -> dict:
     """Projeta os dados normalizados atuais no envelope estÃ¡vel do protocolo v2."""
     generated = now or datetime.now(timezone.utc)
     v1 = build_payload_v1(claude_dir, codex_index, max_sessions, tz, generated,
                           hidden=hidden, pinned=pinned, opencode_db=opencode_db,
-                          opencode_ctx_window=opencode_ctx_window)
+                          opencode_ctx_window=opencode_ctx_window,
+                          history_db=history_db)
     legacy_stats = v1["stats"]
     series = collect_series(claude_dir, CODEX_SESSIONS, tz, generated)
     usage = {"series": [{"provider": item.provider, "buckets": dict(item.buckets),
@@ -555,6 +598,10 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
              "active_12h": legacy_stats["active_12h"],
              "token_window_h": legacy_stats["token_window_h"],
              "total_sessions": legacy_stats["total_sessions"]}
+    if "history" in legacy_stats:
+        usage["history"] = legacy_stats["history"]
+    if "usage" in legacy_stats:
+        usage["top"] = legacy_stats["usage"]["top"]
     return build_snapshot_v2(
         sessions=v1["sessions"], catalog=v1["catalog"], usage=usage,
         quota=legacy_stats["quota"], health=hook_health(), node_id=node_id,
@@ -645,6 +692,20 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
     print("[daemon] Monitor.AI -> {} a cada {}s (dia em UTC{:+g}, board = ultimas {:.0f}h)"
           .format(url, interval, args.tz_offset, BOARD_WINDOW_S / 3600))
 
+    # Guarda de instancia unica: dois daemons postando no mesmo segundo geram o
+    # mesmo generated_at_epoch e o anti-replay da placa derruba um deles com 409.
+    guard = None
+    if not getattr(args, "once", False):
+        # Guarda so para o daemon continuo (--once e um ciclo solto, inofensivo);
+        # sem este escape, o pytest do run() falha quando ha um daemon real rodando.
+        guard = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            guard.bind(("127.0.0.1", 8770))
+        except OSError:
+            print("[daemon] JA EXISTE outro daemon rodando (porta de guarda 8770 "
+                  "ocupada). Encerrando esta instancia.", file=sys.stderr)
+            return 1
+
     # Relido a cada ciclo de proposito: os arquivos de hook sao globais e outra
     # ferramenta pode reescreve-los com o daemon ja rodando — foi assim que aconteceu.
     avisos_anteriores: list = []
@@ -655,11 +716,13 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
         opencode_db = (Path(args.opencode_db) if getattr(args, "opencode_db", None)
                        else opencode_default_db())
         ctx_window = config.usage.opencode_context_window
+        history_db = Path(config.storage.database_path)
         if args.protocol == 1:
             payload = build_payload_v1(claude_dir, codex_index, args.max_sessions, tz,
                                        hidden=hidden, pinned=pinned,
                                        opencode_db=Path(opencode_db) if opencode_db else None,
-                                       opencode_ctx_window=ctx_window)
+                                       opencode_ctx_window=ctx_window,
+                                       history_db=history_db)
             st = payload["stats"]
         else:
             sequence += 1
@@ -668,7 +731,7 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                 device_id=device_id, daemon_instance_id=daemon_instance_id,
                 sequence=sequence, hidden=hidden, pinned=pinned,
                 opencode_db=Path(opencode_db) if opencode_db else None,
-                opencode_ctx_window=ctx_window)
+                opencode_ctx_window=ctx_window, history_db=history_db)
             st = payload["stats"]["usage"]
         today_tokens = usage_total_for_log(st)
         status = post_sessions(url, payload, timeout=config.transport.timeout_s,
@@ -699,6 +762,22 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
             today_tokens = usage_total_for_log(st)
             status = post_sessions(url, payload, timeout=config.transport.timeout_s,
                                    token=transport_token)
+        retried = False
+        if status == 0:
+            # Timeout/erro de rede: a placa pode estar reassociando o Wi-Fi OU a
+            # resposta se perdeu depois de aplicado (medido: retry volta 409 do
+            # anti-replay — o payload JÁ estava na placa). Uma retomada curta
+            # resolve a maioria; 4xx da 1a tentativa nao cai aqui (sem retry cego).
+            time.sleep(1.5)
+            retried = True
+            status = post_sessions(url, payload, timeout=config.transport.timeout_s,
+                                   token=transport_token)
+        if status == 409 and retried:
+            # Anti-replay confirmou que a 1a tentativa foi aplicada; resposta e que
+            # se perdeu. Tratar como sucesso evita marcar FALHOU um ciclo saudavel.
+            status = 200
+            print("[daemon] payload ja aplicado na 1a tentativa (resposta perdida "
+                  "na rede); 409 do anti-replay tratado como OK")
         ok = 200 <= status < 300
 
         # So imprime quando o diagnostico MUDA: repetir o mesmo aviso a cada 5s vira
@@ -714,7 +793,7 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
             datetime.now().strftime("%H:%M:%S"),
             "OK" if ok else "FALHOU",
             len(payload["sessions"]), st["active_12h"],
-            today_tokens, format_summary(payload)))
+            today_tokens, format_summary(payload)), flush=True)
 
         if args.once:
             break

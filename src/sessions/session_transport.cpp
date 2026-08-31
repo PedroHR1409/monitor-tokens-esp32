@@ -7,6 +7,7 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include "touch_driver.h"
+#include "ui_dashboard.h"
 #include "display_driver.h"
 #include "id_list.h"
 #include "session_freshness.h"
@@ -19,6 +20,8 @@ static uint32_t s_lastSuccessfulCommunicationMillis = 0;
 static uint64_t s_lastSuccessfulCommunicationEpoch = 0;
 static uint64_t s_lastPayloadGeneratedEpoch = 0;
 UsageStats usageStats = {};
+UsageHistory usageHistory = {};
+UsageTop usageTop = {};
 UiDiag uiDiag = {};
 CatalogEntry catalog[CATALOG_MAX];
 uint8_t catalogCount = 0;
@@ -116,6 +119,32 @@ void handle_diag() {
     JsonArray cl = to["card_longs"].to<JsonArray>();
     for (uint8_t i = 0; i < MAX_SESSIONS; i++) { cc.add(t.cardClicks[i]); cl.add(t.cardLongs[i]); }
     to["card_ignored_empty"] = t.cardIgnoredEmpty;
+
+    // Diagnostico do widget unificado: prova (ou refuta) que o historico chegou e
+    // qual visao esta ativa — sem depender de impressao visual na tela.
+    to["usage_valid"]   = usageHistory.valid;
+    to["usage_today"]   = usageHistory.valid ? usageHistory.daily[USAGE_DAYS - 1] : 0;
+    to["usage_peak30d"] = [&]{ uint32_t p = 0;
+        for (int d = 0; d < USAGE_DAYS; d++)
+            if (usageHistory.daily[d] > p) p = usageHistory.daily[d];
+        return p; }();
+    to["usage_view"]    = ui_dashboard_usage_view();
+    int dbgBuilt = 0, dbgX = -1, dbgY = -1;
+    uint32_t dbgColor = 0;
+    ui_dashboard_usage_debug(&dbgBuilt, &dbgX, &dbgY, &dbgColor);
+    to["usage_built"]   = dbgBuilt;
+    to["usage_cell_x"]  = dbgX;
+    to["usage_cell_y"]  = dbgY;
+    to["usage_cell_rgb"] = dbgColor;
+    int dHeat = -1, dPodio = -1, dAbsX = -1, dAbsY = -1, dClick = -1;
+    uint32_t dReal = 0;
+    ui_dashboard_usage_debug2(&dHeat, &dPodio, &dAbsX, &dAbsY, &dReal, &dClick);
+    to["usage_heat_vis"]  = dHeat;
+    to["usage_podio_vis"] = dPodio;
+    to["usage_abs_x"]     = dAbsX;
+    to["usage_abs_y"]     = dAbsY;
+    to["usage_real_rgb"]  = dReal;
+    to["usage_cell_click"] = dClick;
 
     JsonObject lo = doc["loop"].to<JsonObject>();
     lo["ui_updates"]     = uiDiag.updates;
@@ -421,6 +450,48 @@ void handle_sessions_post() {
         }
 
         usageStats.valid = true;
+
+        // stats.history.daily — campo ADITIVO: ausente = daemon legado, historico
+        // fica invalido (widget mostra grade vazia) e o payload continua valido.
+        usageHistory = UsageHistory{};
+        JsonArray daily = st["history"]["daily"].as<JsonArray>();
+        if (!daily.isNull()) {
+            int i = 0;
+            for (JsonVariant v : daily) {
+                if (i >= USAGE_DAYS) break;
+                usageHistory.daily[i++] = v | 0UL;
+            }
+            usageHistory.valid = (i == USAGE_DAYS);
+        }
+
+        // stats.usage.top — podio por agente (aditivo, Escopo B)
+        usageTop = UsageTop{};
+        JsonObject top = st["usage"]["top"].as<JsonObject>();
+        if (!top.isNull()) {
+            static const char *PERIODS[USAGE_PERIODS] = {"d1", "d7", "d30"};
+            static const char *PROVIDERS[3] = {"claude", "codex", "opencode"};
+            for (int p = 0; p < USAGE_PERIODS; p++) {
+                JsonObject per = top[PERIODS[p]].as<JsonObject>();
+                if (per.isNull()) continue;
+                for (int pr = 0; pr < 3; pr++) {
+                    JsonObject pv = per[PROVIDERS[pr]].as<JsonObject>();
+                    if (pv.isNull()) continue;
+                    ProviderTop &dst = usageTop.providers[p][pr];
+                    dst.total = pv["total"] | 0UL;
+                    JsonArray ss = pv["sessions"].as<JsonArray>();
+                    int i = 0;
+                    for (JsonObject s : ss) {
+                        if (i >= TOP_SESSIONS) break;
+                        strncpy(dst.names[i], s["name"] | "?", sizeof(dst.names[i]) - 1);
+                        dst.names[i][sizeof(dst.names[i]) - 1] = 0;
+                        dst.tokens[i] = s["tokens"] | 0UL;
+                        i++;
+                    }
+                    dst.count = (uint8_t)i;
+                    usageTop.valid = true;
+                }
+            }
+        }
         usageStats.stale = false;
         usageStats.lastUpdateMillis = now;
     }

@@ -129,6 +129,38 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
         self.assertEqual("ses-d", sessions[0]["id"])
         self.assertEqual("x", sessions[0]["branch"])   # read_git_branch devolve o ultimo segmento
 
+    def test_project_name_prefers_directory_basename_over_title(self):
+        """AC: cards DeepSeek/GLM mostram o NOME DO PROJETO, nao a 1a mensagem."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = _write_db(root / "opencode.db", [
+                _session("ses-name", NOW - timedelta(seconds=10),
+                         title="New session - 2026-08-28T19:48:10.291Z",
+                         directory=str(root / "projetos" / "monitor-tokens-esp32")),
+                _session("ses-fb", NOW - timedelta(seconds=10),
+                         title="Aula de revisao", directory=""),
+            ], [])
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        by_id = {s["id"]: s["project"] for s in sessions}
+        self.assertEqual("monitor-tokens-esp32", by_id["ses-name"])
+        self.assertEqual("Aula de revisao", by_id["ses-fb"])   # sem directory: title
+
+    def test_project_name_prefers_directory_basename_over_title(self):
+        """AC: cards DeepSeek/GLM mostram o NOME DO PROJETO, nao a 1a mensagem."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = _write_db(root / "opencode.db", [
+                _session("ses-name", NOW - timedelta(seconds=10),
+                         title="New session - 2026-08-28T19:48:10.291Z",
+                         directory=str(root / "projetos" / "monitor-tokens-esp32")),
+                _session("ses-fb", NOW - timedelta(seconds=10),
+                         title="Aula de revisao", directory=""),
+            ], [])
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        by_id = {s["id"]: s["project"] for s in sessions}
+        self.assertEqual("monitor-tokens-esp32", by_id["ses-name"])
+        self.assertEqual("Aula de revisao", by_id["ses-fb"])   # sem directory: title
+
     def test_missing_database_returns_empty(self):
         self.assertEqual([], opencode_sessions.scan_opencode_sessions(
             NOW, database=Path("Z:/inexistentes/opencode.db")))

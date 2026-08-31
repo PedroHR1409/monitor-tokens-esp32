@@ -36,6 +36,14 @@ String session_transport_ip_string();
 // Estatisticas agregadas do ultimo POST (cards de tokens e sparkline).
 extern UsageStats usageStats;
 
+// Historico diario do ultimo POST (heatmap de 30 dias). valid=false ate o primeiro
+// payload que trouxer stats.history.daily.
+extern UsageHistory usageHistory;
+
+// Podio por agente do ultimo POST (stats.usage.top). valid=false ate o primeiro
+// payload que trouxer o bloco (daemon legado ou Escopo A ainda rodando).
+extern UsageTop usageTop;
+
 // Tempos do ciclo de UI, expostos em GET /diag. Servem para provar (ou refutar) que a
 // interface esta mesmo atualizando a cada 1s, em vez de depender de impressao visual.
 struct UiDiag {

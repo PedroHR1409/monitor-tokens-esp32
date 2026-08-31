@@ -137,32 +137,45 @@ uint32_t  g_cHeaderDot = 0;
 char      g_cClock[8] = "";
 
 // card de tokens
-lv_obj_t *g_tokValue = nullptr, *g_tokSessions = nullptr;
-char g_cTok[12] = "", g_cTokSess[16] = "";
+// Widget unificado de consumo: substitui os cards de tokens/cota e a faixa 12h.
+// Duas visoes alternadas por toque; a escolha e do OPERADOR, nao do daemon, e
+// sobrevive ao refresh (mesma regra do antigo card rotativo).
+lv_obj_t *g_uwCard = nullptr;
+lv_obj_t *g_uwHeatmap = nullptr, *g_uwPodio = nullptr;
+lv_obj_t *g_uwCell[USAGE_DAYS] = {nullptr};
+uint32_t g_cUwCell[USAGE_DAYS] = {0};
+bool g_uwHeatOn = true, g_uwPodioOn = false;
+uint8_t g_uwView = 0;              // 0 = heatmap, 1 = podio (Escopo B)
+bool g_uwBuilt = false;            // grade criada 1x; refresh so troca cores
+lv_obj_t *g_uwArrow = nullptr;     // faixa da seta: unica via heatmap <-> podio
+lv_obj_t *g_uwArrowLbl = nullptr;
+char g_cUwArrow[4] = "";
+// Modo inspecao: -1 = repouso; 0..29 = dia tocado (barra full-width).
+int8_t g_uwInspectDay = -1;
+lv_obj_t *g_uwInspect = nullptr, *g_uwInspectL1 = nullptr, *g_uwInspectL2 = nullptr;
+char g_cUwInspect1[40] = "", g_cUwInspect2[40] = "";
+int16_t g_cUwY0 = -1;              // ultimo offset vertical aplicado (evita realinhar)
 
-// cards de cota (ocuparam a faixa que era do Pomodoro)
-lv_obj_t *g_qCxValue = nullptr, *g_qCxSub = nullptr, *g_qCxTitle = nullptr;
-lv_obj_t *g_qClValue = nullptr, *g_qClSub = nullptr, *g_qClTitle = nullptr;
-char g_cQCxValue[8] = "", g_cQCxSub[14] = "", g_cQCxTitle[12] = "";
-char g_cQClValue[8] = "", g_cQClSub[14] = "", g_cQClTitle[12] = "";
-uint32_t g_cQCxColor = 0, g_cQClColor = 0;
-// Card de consumo rotativo: toque cicla claude -> opencode -> codex. 0-based no enum
-// local QUOTA_ROT_*; o valor sobrevive ao refresh porque update_quota_cards le dele.
-uint8_t g_quotaRot = 0;
-enum : uint8_t { QUOTA_ROT_CLAUDE = 0, QUOTA_ROT_OPENCODE = 1, QUOTA_ROT_CODEX = 2 };
+// Podio: 3 barras rankeadas pelo total do periodo; chip cicla hoje/7d/30d; tocar
+// numa barra abre o modal com as sessoes do provider (top 6 do payload).
+lv_obj_t *g_uwChip = nullptr;
+lv_obj_t *g_uwBar[3] = {nullptr};
+lv_obj_t *g_uwBarName[3] = {nullptr};
+lv_obj_t *g_uwBarValue[3] = {nullptr};
+char g_cUwChip[6] = "";
+char g_cUwBarName[3][12] = {{0}};
+char g_cUwBarValue[3][8] = {{0}};
+uint8_t g_uwPeriod = 0;            // 0 = hoje, 1 = 7d, 2 = 30d
+int8_t g_uwOrder[3] = {0, 1, 2};   // provider idx em ordem de rank
 
-// Heatmap de 12 horas. Escolhido depois de medir o dado real: 10 dos 12 baldes sao
-// zero e o pico chega a 10x o menor valor nao-nulo. Uso de tokens e esparso e em
-// rajadas, entao linha/coluna vira "reta no chao + penhasco"; no heatmap a hora vazia
-// e so um bloco apagado, que le bem. Ver docs/SPEC.md secao 11.
-lv_obj_t *g_hmCell[SPARK_BUCKETS]  = {nullptr};   // bloco de intensidade
-lv_obj_t *g_hmValue[SPARK_BUCKETS] = {nullptr};   // tokens da hora, em milhoes
-lv_obj_t *g_hmHour[SPARK_BUCKETS]  = {nullptr};   // hora do balde
-uint32_t  g_cHmValue[SPARK_BUCKETS] = {0};
-uint32_t  g_cHmOpa[SPARK_BUCKETS]   = {0xFFFF};
-char      g_cHmValueTxt[SPARK_BUCKETS][6] = {{0}};
-char      g_cHmHourTxt[SPARK_BUCKETS][4]  = {{0}};
-uint8_t   g_cHmEndHour = 255;
+// Modal de drill-down (reaproveita o padrao do seletor de sessoes).
+lv_obj_t *g_uwModal = nullptr, *g_uwModalTitle = nullptr;
+lv_obj_t *g_uwModalName[TOP_SESSIONS] = {nullptr};
+lv_obj_t *g_uwModalTok[TOP_SESSIONS] = {nullptr};
+char g_cUwModalTitle[24] = "";
+char g_cUwModalName[TOP_SESSIONS][28] = {{0}};
+char g_cUwModalTok[TOP_SESSIONS][8] = {{0}};
+int8_t g_uwModalProvider = -1;
 
 // --- Tela de detalhe (toque curto num card) ---
 // Padrao minimo: cobre a tela inteira, mostra o que nao cabe no card de 96px (nome
@@ -192,8 +205,18 @@ uint32_t g_cScreenBorder = 0;
 // Definidos mais abaixo (precisam de show_detail, que depende dos widgets do detalhe),
 // mas usados ja em build_session_card.
 void card_event_cb(lv_event_t *e);
-void update_quota_cards();
-void quota_rot_cb(lv_event_t *e);
+void update_usage_widget();
+void usage_widget_toggle_cb(lv_event_t *e);
+void usage_widget_chip_cb(lv_event_t *e);
+void usage_widget_bar_cb(lv_event_t *e);
+void usage_card_cb(lv_event_t *e);
+void usage_arrow_cb(lv_event_t *e);
+void usage_exit_inspection();
+void usage_cell_cb(lv_event_t *e);
+void layout_usage_podio();
+void render_usage_podio();
+void usage_modal_close_cb(lv_event_t *e);
+static const char *usage_period_label();
 void picker_open();
 void picker_close_cb(lv_event_t *e);
 void picker_pick_cb(lv_event_t *e);
@@ -351,106 +374,437 @@ void card_event_cb(lv_event_t *e) {
     }
 }
 
-void build_tokens_card(lv_obj_t *parent) {
-    lv_obj_t *card = make_card(parent, theme::MARGIN, theme::ROW2_Y, theme::CELL, theme::CELL);
+// ---------------------------------------------------------------- widget unificado
 
-    lv_obj_t *title = make_label(card, &lv_font_montserrat_14, theme::COLOR_TEXT_FAINT);
-    lv_label_set_text(title, "tokens");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
-
-    g_tokValue = make_label(card, &lv_font_montserrat_20, theme::COLOR_ACCENT);
-    lv_label_set_text(g_tokValue, "--");
-    lv_obj_align(g_tokValue, LV_ALIGN_CENTER, 0, 0);
-
-    g_tokSessions = make_label(card, &lv_font_montserrat_14, theme::COLOR_TEXT_FAINT);
-    lv_label_set_text(g_tokSessions, "");
-    lv_obj_align(g_tokSessions, LV_ALIGN_BOTTOM_MID, 0, 0);
+// Nivel de intensidade do dia, relativo ao pico da janela (mesma leitura do GitHub
+// em qualquer escala: 50k ou 5M de pico produzem o mesmo degrau de cor).
+uint32_t heatmap_color(uint32_t tokens, uint32_t peak) {
+    if (tokens == 0 || peak == 0) return theme::HM_EMPTY;
+    const uint32_t pct = tokens * 100UL / peak;
+    if (pct > 75) return theme::HM_L4;
+    if (pct > 50) return theme::HM_L3;
+    if (pct > 25) return theme::HM_L2;
+    return theme::HM_L1;
 }
 
-// Os dois cards de cota tem a MESMA forma (titulo / numero / rodape) de proposito: a
-// comparacao entre eles so funciona se a diferenca visivel for o conteudo, nao o
-// desenho. O que separa oficial de estimado e o rodape ("5h oficial" x "estimado") e o
-// til antes do numero do Claude.
-lv_obj_t *build_quota_card(lv_obj_t *parent, int16_t x, const char *title,
-                           lv_obj_t **titleOut, lv_obj_t **valueOut, lv_obj_t **subOut) {
-    lv_obj_t *card = make_card(parent, x, theme::ROW2_Y, theme::CELL, theme::CELL);
+// Grid estilo GitHub: colunas = semanas, linhas = dias da semana (domingo no topo),
+// 30 dias terminando hoje. Sem rotulos - exigencia do usuario; o formato ja le.
+// Celulas criadas 1x; o refresh apenas recolore (e realinha so quando o mes vira).
+constexpr int16_t UW_H = SCREEN_H - theme::MARGIN - theme::ROW2_Y;
+constexpr int16_t UW_TITLE_H = 20;                       // linha do titulo
+constexpr int16_t UW_GRID_W = theme::SPARK_W - 28;       // grade = card - faixa da seta
+constexpr int16_t UW_CSX = 36, UW_CSY = 29;              // celulas com gap 2 (pitch 38x31)
+constexpr int16_t UW_Y0 = UW_TITLE_H + 2;                // topo da grade
 
-    lv_obj_t *cap = make_label(card, &lv_font_montserrat_14, theme::COLOR_TEXT_FAINT);
-    lv_label_set_text(cap, title);
-    lv_obj_align(cap, LV_ALIGN_TOP_MID, 0, 0);
-    if (titleOut) *titleOut = cap;
-
-    *valueOut = make_label(card, &lv_font_montserrat_20, theme::COLOR_TEXT_DIM);
-    lv_label_set_text(*valueOut, "--");
-    lv_obj_align(*valueOut, LV_ALIGN_CENTER, 0, 0);
-
-    *subOut = make_label(card, &lv_font_montserrat_12, theme::COLOR_TEXT_FAINT);
-    lv_label_set_text(*subOut, "");
-    lv_obj_align(*subOut, LV_ALIGN_BOTTOM_MID, 0, 0);
-    return card;
+// Escurece 75% (mantem 25% do brilho por canal) — modo inspecao, sem overlay.
+uint32_t uw_dim(uint32_t hex) {
+    const uint32_t r = ((hex >> 16) & 0xFF) / 4;
+    const uint32_t g = ((hex >> 8) & 0xFF) / 4;
+    const uint32_t b = (hex & 0xFF) / 4;
+    return (r << 16) | (g << 8) | b;
 }
 
-void build_quota_cards(lv_obj_t *parent) {
-    build_quota_card(parent, theme::QUOTA_CX_X, "codex",
-                     &g_qCxTitle, &g_qCxValue, &g_qCxSub);
-    lv_obj_t *rotCard = build_quota_card(parent, theme::QUOTA_CL_X, "claude",
-                                         &g_qClTitle, &g_qClValue, &g_qClSub);
-    // Seta roxa = affordance de rotacao: o card e tocavel e cicla fontes. Sem a seta,
-    // a rotacao era um segredo que so quem leu o README descobria.
-    lv_obj_t *arrow = lv_label_create(rotCard);
-    lv_label_set_text(arrow, LV_SYMBOL_RIGHT);
-    lv_obj_set_style_text_color(arrow, theme::color(theme::COLOR_STALE), 0);
-    lv_obj_align(arrow, LV_ALIGN_TOP_RIGHT, -2, 0);
-    lv_obj_add_flag(rotCard, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(rotCard, quota_rot_cb, LV_EVENT_SHORT_CLICKED, nullptr);
+const char *uw_weekday_full(int wday) {
+    static const char *NAMES[7] = {"Domingo", "Segunda-feira", "Terca-feira",
+                                   "Quarta-feira", "Quinta-feira", "Sexta-feira",
+                                   "Sabado"};
+    return NAMES[wday % 7];
 }
 
-// Toque no card de consumo cicla a fonte exibida. Callback precisa ficar no card
-// (nao nos labels), senao tocar no texto nao dispara — mesmo padrao dos cards de
-// sessao, que recebem o clique no container.
-void quota_rot_cb(lv_event_t *e) {
-    (void)e;
-    g_quotaRot = (g_quotaRot + 1) % 3;
-    update_quota_cards();
+void uw_tokens_str(uint32_t v, char *buf, size_t len) {
+    // Sempre em MM, 1 casa decimal, virgula pt-BR, SEM sufixo (unidade no titulo).
+    snprintf(buf, len, "%lu,%lu", v / 1000000UL, (v % 1000000UL) / 100000UL);
 }
 
-void build_heatmap_card(lv_obj_t *parent) {
-    lv_obj_t *card = make_card(parent, theme::MARGIN, theme::SPARK_Y, theme::SPARK_W, theme::SPARK_H);
+void build_usage_widget(lv_obj_t *parent) {
+    g_uwCard = make_card(parent, theme::MARGIN, theme::ROW2_Y,
+                         theme::SPARK_W, UW_H);
+    // Fundo mais escuro que o padrao dos cards: a celula vazia (#161B22, paleta
+    // GitHub) precisa contrastar para o "dia sem uso" nao sumir no card.
+    lv_obj_set_style_bg_color(g_uwCard, theme::color(theme::COLOR_BG), 0);
+    // Toque no card (vaos/titulo) SAI da inspecao; em repouso nao faz nada.
+    // O long-press foi REMOVIDO: o podio agora e acionado so pela seta lateral.
+    lv_obj_add_flag(g_uwCard, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(g_uwCard, usage_card_cb, LV_EVENT_SHORT_CLICKED, nullptr);
 
-    // Sem titulo: o espaco foi todo para os rotulos de hora e de tokens, que carregam
-    // mais informacao que a legenda fixa.
-    const int16_t inner = theme::SPARK_W - 2 * theme::HM_PAD;
-    const int16_t cw = (inner - theme::HM_GAP * (SPARK_BUCKETS - 1)) / SPARK_BUCKETS;
+    // Titulo permanente do card (linha propria de ~20px).
+    lv_obj_t *title = make_label(g_uwCard, &lv_font_montserrat_12, theme::COLOR_TEXT_FAINT);
+    lv_label_set_text(title, "CONSUMO DE TOKENS (EM MM)");
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 3);
 
-    for (int i = 0; i < SPARK_BUCKETS; i++) {
-        const int16_t x = i * (cw + theme::HM_GAP);
+    g_uwHeatmap = lv_obj_create(g_uwCard);
+    lv_obj_remove_style_all(g_uwHeatmap);
+    lv_obj_set_size(g_uwHeatmap, theme::SPARK_W, UW_H);
+    // lv_obj nasce CLICKABLE mesmo sem estilo: sem isto, o container engole o toque
+    // e o toggle do card nunca dispara (diagnosticado via /diag, usage_cell_click).
+    lv_obj_clear_flag(g_uwHeatmap, LV_OBJ_FLAG_CLICKABLE);
 
-        // tokens da hora (em milhoes), acima do bloco
-        g_hmValue[i] = make_label(card, &lv_font_montserrat_12, theme::COLOR_TEXT_FAINT);
-        // Nao usar LONG_MODE_CLIP aqui: ele seta expand=1 no label, o que faz o widget
-        // se dimensionar pelo texto e IGNORAR a largura definida — e sem largura o
-        // TEXT_ALIGN_CENTER nao tem sobre o que centralizar, entao o rotulo encostava a
-        // esquerda em vez de alinhar com a barra. O texto tem 3 caracteres e cabe em cw.
-        lv_label_set_long_mode(g_hmValue[i], LV_LABEL_LONG_MODE_WRAP);
-        lv_obj_set_width(g_hmValue[i], cw);
-        lv_obj_set_style_text_align(g_hmValue[i], LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(g_hmValue[i], LV_ALIGN_TOP_LEFT, x, theme::HM_VALUE_Y);
-
-        g_hmCell[i] = lv_obj_create(card);
-        lv_obj_remove_style_all(g_hmCell[i]);
-        lv_obj_set_size(g_hmCell[i], cw, theme::HM_CELL_H);
-        lv_obj_set_style_radius(g_hmCell[i], 3, 0);
-        lv_obj_set_style_bg_color(g_hmCell[i], theme::color(theme::COLOR_ACCENT), 0);
-        lv_obj_set_style_bg_opa(g_hmCell[i], LV_OPA_COVER, 0);
-        lv_obj_align(g_hmCell[i], LV_ALIGN_TOP_LEFT, x, theme::HM_CELL_Y);
-
-        // hora do balde, abaixo do bloco
-        g_hmHour[i] = make_label(card, &lv_font_montserrat_12, theme::COLOR_TEXT_FAINT);
-        lv_label_set_long_mode(g_hmHour[i], LV_LABEL_LONG_MODE_WRAP);
-        lv_obj_set_width(g_hmHour[i], cw);
-        lv_obj_set_style_text_align(g_hmHour[i], LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(g_hmHour[i], LV_ALIGN_TOP_LEFT, x, theme::HM_HOUR_Y);
+    // Grade HORIZONTAL com o GAP FINO do GitHub (2px): celulas 37x32, pitch 39x34.
+    // Abaixo da linha do titulo. Clicavel de proposito: abre a inspecao do dia.
+    constexpr int16_t CSX = 37, CSY = 32, GAP = 2;
+    for (int d = 0; d < USAGE_DAYS; d++) {
+        g_uwCell[d] = lv_obj_create(g_uwHeatmap);
+        lv_obj_remove_style_all(g_uwCell[d]);
+        lv_obj_set_size(g_uwCell[d], CSX, CSY);
+        lv_obj_set_style_bg_color(g_uwCell[d], theme::color(theme::HM_EMPTY), 0);
+        lv_obj_set_style_bg_opa(g_uwCell[d], LV_OPA_COVER, 0);
+        lv_obj_add_flag(g_uwCell[d], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(g_uwCell[d], usage_cell_cb, LV_EVENT_SHORT_CLICKED,
+                            (void *)(intptr_t)d);
     }
+
+    // Barra de inspecao: dia tocado esticado para a LARGURA TODA da grade, criada
+    // 1x e oculta. Toque nela sai do modo inspecao (mesma regra do card).
+    g_uwInspect = lv_obj_create(g_uwHeatmap);
+    lv_obj_remove_style_all(g_uwInspect);
+    lv_obj_set_size(g_uwInspect, UW_GRID_W, 56);
+    lv_obj_set_style_radius(g_uwInspect, 6, 0);
+    lv_obj_set_style_bg_color(g_uwInspect, theme::color(theme::COLOR_BG), 0);
+    lv_obj_set_style_bg_opa(g_uwInspect, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(g_uwInspect, 2, 0);
+    lv_obj_set_style_border_color(g_uwInspect, theme::color(theme::COLOR_TEXT), 0);
+    lv_obj_add_flag(g_uwInspect, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(g_uwInspect, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(g_uwInspect, usage_card_cb, LV_EVENT_SHORT_CLICKED, nullptr);
+
+    g_uwInspectL1 = make_label(g_uwInspect, &lv_font_montserrat_14, theme::COLOR_TEXT);
+    lv_obj_set_width(g_uwInspectL1, UW_GRID_W - 12);
+    lv_obj_set_style_text_align(g_uwInspectL1, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_uwInspectL1, LV_ALIGN_TOP_MID, 0, 7);
+    g_uwInspectL2 = make_label(g_uwInspect, &lv_font_montserrat_12, theme::COLOR_TEXT_DIM);
+    lv_obj_set_width(g_uwInspectL2, UW_GRID_W - 12);
+    lv_obj_set_style_text_align(g_uwInspectL2, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_uwInspectL2, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+    // Faixa da seta: UNICA via heatmap <-> podio. Container clicavel 28px com o
+    // simbolo CENTRALIZADO pelo LVGL (lv_obj_center) — centralizacao garantida.
+    g_uwArrow = lv_obj_create(g_uwCard);
+    lv_obj_remove_style_all(g_uwArrow);
+    lv_obj_set_size(g_uwArrow, 28, UW_H - UW_TITLE_H);
+    lv_obj_align(g_uwArrow, LV_ALIGN_TOP_RIGHT, 0, UW_TITLE_H);
+    lv_obj_clear_flag(g_uwArrow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(g_uwArrow, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(g_uwArrow, usage_arrow_cb, LV_EVENT_SHORT_CLICKED, nullptr);
+
+    g_uwArrowLbl = make_label(g_uwArrow, &lv_font_montserrat_16, theme::COLOR_TEXT_DIM);
+    lv_label_set_text(g_uwArrowLbl, LV_SYMBOL_RIGHT);
+    lv_obj_center(g_uwArrowLbl);
+
+    // --- Visao 2: podio + chip de periodo (Escopo B) ---
+    g_uwPodio = lv_obj_create(g_uwCard);
+    lv_obj_remove_style_all(g_uwPodio);
+    lv_obj_set_size(g_uwPodio, theme::SPARK_W, UW_H);
+    lv_obj_clear_flag(g_uwPodio, LV_OBJ_FLAG_CLICKABLE);
+
+    // Chip: pequeno, canto superior direito, tap cicla o periodo. Clicavel nele
+    // mesmo: toque no chip NAO alterna a visao (prioridade chip > barra > visao).
+    g_uwChip = make_label(g_uwPodio, &lv_font_montserrat_12, theme::COLOR_STALE);
+    lv_label_set_text(g_uwChip, "hoje");
+    lv_obj_align(g_uwChip, LV_ALIGN_TOP_RIGHT, -34, 4);   // dentro do card, ao lado da seta
+    lv_obj_add_flag(g_uwChip, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(g_uwChip, usage_widget_chip_cb, LV_EVENT_SHORT_CLICKED, nullptr);
+
+    // Podio em COLUNAS: 2o (esq) | 1o (centro) | 3o (dir). Barra vertical com
+    // altura por rank; icone + valor acima; nome abaixo. Criados como filhos do
+    // podio (NAO da barra): a barra muda de altura, o header/nome ficam fixos.
+    constexpr int16_t PB_W = 72, PB_H = 88;
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *bar = lv_obj_create(g_uwPodio);
+        lv_obj_remove_style_all(bar);
+        lv_obj_set_size(bar, PB_W, PB_H);
+        lv_obj_set_style_radius(bar, 6, 0);
+        lv_obj_set_style_bg_color(bar, theme::color(theme::COLOR_CARD_BG), 0);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(bar, 1, 0);
+        lv_obj_set_style_border_color(bar, theme::color(theme::COLOR_CARD_BORDER), 0);
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(bar, usage_widget_bar_cb, LV_EVENT_SHORT_CLICKED,
+                            (void *)(intptr_t)i);
+        g_uwBar[i] = bar;
+
+
+        g_uwBarValue[i] = make_label(g_uwPodio, &lv_font_montserrat_14, theme::COLOR_TEXT);
+        lv_obj_set_width(g_uwBarValue[i], 72);
+        lv_obj_set_style_text_align(g_uwBarValue[i], LV_TEXT_ALIGN_CENTER, 0);
+
+        g_uwBarName[i] = make_label(g_uwPodio, &lv_font_montserrat_12, theme::COLOR_TEXT_DIM);
+        lv_obj_set_width(g_uwBarName[i], PB_W);
+        lv_obj_set_style_text_align(g_uwBarName[i], LV_TEXT_ALIGN_CENTER, 0);
+    }
+    layout_usage_podio();
+
+    // --- Modal de drill-down: padrao do seletor de sessoes (backdrop + linhas) ---
+    g_uwModal = lv_obj_create(parent);
+    lv_obj_remove_style_all(g_uwModal);
+    lv_obj_set_size(g_uwModal, SCREEN_W, SCREEN_H);
+    lv_obj_set_pos(g_uwModal, 0, 0);
+    lv_obj_set_style_bg_color(g_uwModal, theme::color(theme::COLOR_BG), 0);
+    lv_obj_set_style_bg_opa(g_uwModal, LV_OPA_90, 0);
+    lv_obj_add_flag(g_uwModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(g_uwModal, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(g_uwModal, usage_modal_close_cb, LV_EVENT_SHORT_CLICKED, nullptr);
+
+    g_uwModalTitle = make_label(g_uwModal, &lv_font_montserrat_14, theme::COLOR_TEXT);
+    lv_obj_align(g_uwModalTitle, LV_ALIGN_TOP_MID, 0, 24);
+
+    for (int i = 0; i < TOP_SESSIONS; i++) {
+        g_uwModalName[i] = make_label(g_uwModal, &lv_font_montserrat_14, theme::COLOR_TEXT);
+        lv_obj_set_width(g_uwModalName[i], SCREEN_W - 120);
+        lv_label_set_long_mode(g_uwModalName[i], LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_align(g_uwModalName[i], LV_ALIGN_TOP_LEFT, 16, 60 + i * 32);
+
+        g_uwModalTok[i] = make_label(g_uwModal, &lv_font_montserrat_14,
+                                     theme::COLOR_TEXT_DIM);
+        lv_obj_align(g_uwModalTok[i], LV_ALIGN_TOP_RIGHT, -16, 60 + i * 32);
+    }
+
+    g_uwBuilt = true;
+}
+
+static const char *usage_period_label() {
+    static const char *LABELS[3] = {"hoje", "7d", "30d"};
+    return LABELS[g_uwPeriod];
+}
+
+// Ordem de rank estavel: total desc, empate resolve por indice (nome do provider
+// em PROVIDERS e alfabetico: claude < codex < opencode).
+void layout_usage_podio() {
+    const UsageTop &top = usageTop;
+    int8_t order[3] = {0, 1, 2};
+    if (top.valid) {
+        for (int i = 1; i < 3; i++)
+            for (int j = i; j > 0; j--) {
+                const uint32_t a = top.providers[g_uwPeriod][order[j - 1]].total;
+                const uint32_t b = top.providers[g_uwPeriod][order[j]].total;
+                if (b > a) { const int8_t tmp = order[j - 1]; order[j - 1] = order[j]; order[j] = tmp; }
+                else break;
+            }
+    }
+    for (int i = 0; i < 3; i++) g_uwOrder[i] = order[i];
+}
+
+// Rótulos/valores/ícones por rank; hierarquia por largura e posicao, nao por cor.
+void render_usage_podio() {
+    static const char *NAMES[3] = {"Claude", "Codex", "OpenCode"};
+
+    set_text_if(g_uwChip, g_cUwChip, sizeof(g_cUwChip), usage_period_label());
+
+    // Colunas fixas: rank 0 (1o) -> centro, rank 1 (2o) -> esquerda,
+    // rank 2 (3o) -> direita. Altura da barra por rank; cor degrau L4/L3/L2.
+    constexpr int16_t COL_X[3] = {22, 102, 182};         // esq, centro, dir
+    constexpr int16_t BAR_W = 72, BASE_Y = 190;
+    constexpr int16_t BAR_H[3] = {120, 88, 64};          // altura por rank
+    constexpr uint32_t BAR_C[3] = {theme::HM_L4, theme::HM_L3, theme::HM_L2};
+
+    for (int rank = 0; rank < 3; rank++) {
+        const int8_t provider = g_uwOrder[rank];
+        const int16_t col_x = COL_X[(rank == 0) ? 1 : (rank == 1 ? 0 : 2)];
+        const int16_t bh = BAR_H[rank];
+        const int16_t top = BASE_Y - bh;
+
+        lv_obj_t *bar = g_uwBar[rank];
+        lv_obj_set_size(bar, BAR_W, bh);
+        lv_obj_align(bar, LV_ALIGN_TOP_LEFT, col_x, top);
+
+
+        char val[10];
+        if (usageTop.valid) {
+            uw_tokens_str(usageTop.providers[g_uwPeriod][provider].total, val, sizeof(val));
+        } else {
+            snprintf(val, sizeof(val), "--");
+        }
+        set_text_if(g_uwBarValue[rank], g_cUwBarValue[rank], 8, val);
+        lv_obj_align(g_uwBarValue[rank], LV_ALIGN_TOP_LEFT, col_x, top - 23);
+
+        set_text_if(g_uwBarName[rank], g_cUwBarName[rank], 12, NAMES[provider]);
+        lv_obj_align(g_uwBarName[rank], LV_ALIGN_TOP_LEFT, col_x, BASE_Y + 4);
+    }
+}
+
+void usage_widget_chip_cb(lv_event_t *e) {
+    (void)e;
+    g_uwPeriod = (g_uwPeriod + 1) % 3;
+    layout_usage_podio();
+    render_usage_podio();
+}
+
+void usage_widget_bar_cb(lv_event_t *e) {
+    if (!usageTop.valid) return;
+    const int8_t provider = g_uwOrder[(int)(intptr_t)lv_event_get_user_data(e)];
+    const ProviderTop &pt = usageTop.providers[g_uwPeriod][provider];
+    static const char *NAMES[3] = {"Claude", "Codex", "OpenCode"};
+
+    char title[24];
+    snprintf(title, sizeof(title), "%s - %s", NAMES[provider], usage_period_label());
+    set_text_if(g_uwModalTitle, g_cUwModalTitle, sizeof(g_cUwModalTitle), title);
+
+    char line[30];
+    for (int i = 0; i < TOP_SESSIONS; i++) {
+        if (i < pt.count) {
+            snprintf(line, sizeof(line), "%d. %s", i + 1, pt.names[i]);
+            set_text_if(g_uwModalName[i], g_cUwModalName[i], 28, line);
+            char tok[8];
+            uint32_t t = pt.tokens[i];
+            if (t >= 1000000UL) snprintf(tok, sizeof(tok), "%lu.%luM",
+                (unsigned long)(t / 1000000UL), (unsigned long)((t / 100000UL) % 10));
+            else if (t >= 1000UL) snprintf(tok, sizeof(tok), "%luk", (unsigned long)(t / 1000UL));
+            else snprintf(tok, sizeof(tok), "%lu", (unsigned long)t);
+            set_text_if(g_uwModalTok[i], g_cUwModalTok[i], 8, tok);
+        } else {
+            set_text_if(g_uwModalName[i], g_cUwModalName[i], 28, "");
+            set_text_if(g_uwModalTok[i], g_cUwModalTok[i], 8, "");
+        }
+    }
+    g_uwModalProvider = provider;
+    lv_obj_clear_flag(g_uwModal, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_uwModal);
+}
+
+// Toque em qualquer lugar do backdrop fecha; a escolha de periodo fica intacta.
+void usage_modal_close_cb(lv_event_t *e) {
+    (void)e;
+    lv_obj_add_flag(g_uwModal, LV_OBJ_FLAG_HIDDEN);
+}
+
+void usage_widget_toggle_cb(lv_event_t *e) {
+    (void)e;
+    if (!g_uwBuilt) return;
+    g_uwView = (g_uwView + 1) % 2;
+    update_usage_widget();
+}
+
+void update_usage_widget() {
+    if (!g_uwBuilt) return;
+
+    const bool heat = (g_uwView == 0);
+    set_flag_if(g_uwHeatmap, g_uwHeatOn, !heat);
+    set_flag_if(g_uwPodio, g_uwPodioOn, heat);
+    // Seta aponta para onde a proxima acao leva: ▸ no repouso, ◂ no podio.
+    // g_uwArrow e o CONTAINER (faixa); o texto fica no label filho — lv_label_set_text
+    // no container causava StoreProhibited (backtrace: lv_label_revert_dots).
+    set_text_if(g_uwArrowLbl, g_cUwArrow, sizeof(g_cUwArrow),
+                heat ? LV_SYMBOL_RIGHT : LV_SYMBOL_LEFT);
+    if (!heat) {
+        layout_usage_podio();
+        render_usage_podio();
+        return;
+    }
+
+    // Dia 0 = mais antigo; linha = semana, coluna = dia da semana (dom..sab).
+    // Grade ENCOSTADA: x = col*39, y = titulo + row*33 (+2 de respiro).
+    time_t nowT = time(nullptr);
+    struct tm todayTm, startTm;
+    localtime_r(&nowT, &todayTm);
+    startTm = todayTm;
+    startTm.tm_mday -= (USAGE_DAYS - 1);
+    time_t startT = mktime(&startTm);
+    localtime_r(&startT, &startTm);
+    const int slot0 = startTm.tm_wday;                  // domingo = 0
+    const int rows = (slot0 + USAGE_DAYS + 6) / 7;
+    // Largura util 276 (card - faixa da seta): grade centralizada, SEM invadir a
+    // seta. Altura: 6 linhas de 29 + gaps cabem com folga acima da borda.
+    constexpr int16_t GRID_W = UW_GRID_W - 2;
+    const int16_t x0 = (GRID_W - (7 * UW_CSX + 6 * 2)) / 2;
+    const int16_t y0 = UW_TITLE_H + 2 + (UW_H - UW_TITLE_H - 2 - (rows * (UW_CSY + 2) - 2)) / 2;
+    if (y0 != g_cUwY0) {
+        g_cUwY0 = y0;
+        for (int d = 0; d < USAGE_DAYS; d++) {
+            const int slot = slot0 + d;
+            lv_obj_align(g_uwCell[d], LV_ALIGN_TOP_LEFT,
+                         x0 + (slot % 7) * (UW_CSX + 2),
+                         y0 + (slot / 7) * (UW_CSY + 2));
+        }
+    }
+
+    uint32_t peak = 1;
+    for (int d = 0; d < USAGE_DAYS; d++) {
+        const uint32_t v = usageHistory.valid ? usageHistory.daily[d] : 0;
+        if (v > peak) peak = v;
+    }
+
+    const bool inspecting = (g_uwInspectDay >= 0);
+    for (int d = 0; d < USAGE_DAYS; d++) {
+        const uint32_t v = usageHistory.valid ? usageHistory.daily[d] : 0;
+        uint32_t c = heatmap_color(v, peak);
+        if (inspecting && d != g_uwInspectDay) c = uw_dim(c);
+        set_color_if(g_uwCell[d], g_cUwCell[d], c, lv_obj_set_style_bg_color);
+    }
+
+    // Barra de inspecao: so existe com dia selecionado e historico valido.
+    if (!inspecting || !usageHistory.valid) {
+        lv_obj_add_flag(g_uwInspect, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    const int d = g_uwInspectDay;
+    const uint32_t v = usageHistory.daily[d];
+    char val[10];
+    uw_tokens_str(v, val, sizeof(val));
+    struct tm dayTm;
+    localtime_r(&nowT, &dayTm);
+    dayTm.tm_mday -= (USAGE_DAYS - 1 - d);
+    time_t dayT = mktime(&dayTm);
+    localtime_r(&dayT, &dayTm);
+    char line1[48];
+    snprintf(line1, sizeof(line1), "%s, %02d/%02d - %s tokens",
+             uw_weekday_full(dayTm.tm_wday), dayTm.tm_mday, dayTm.tm_mon + 1, val);
+    set_text_if(g_uwInspectL1, g_cUwInspect1, sizeof(g_cUwInspect1), line1);
+
+    const int slot = slot0 + d;
+    const int first = (slot / 7) * 7 - slot0;
+    const int last = first + 6;
+    uint32_t wk = 0;
+    for (int k = first; k <= last; k++) {
+        if (k < 0 || k >= USAGE_DAYS) continue;
+        wk += usageHistory.daily[k];
+    }
+    char wkval[10];
+    uw_tokens_str(wk, wkval, sizeof(wkval));
+    struct tm a = dayTm, b = dayTm;
+    a.tm_mday += (first - d);
+    b.tm_mday += (last - d);
+    time_t aT = mktime(&a), bT = mktime(&b);
+    localtime_r(&aT, &a); localtime_r(&bT, &b);
+    char line2[48];
+    snprintf(line2, sizeof(line2), "%lu%% do pico - semana %02d-%02d: %s",
+             (unsigned long)(peak ? v * 100UL / peak : 0), a.tm_mday, b.tm_mday, wkval);
+    set_text_if(g_uwInspectL2, g_cUwInspect2, sizeof(g_cUwInspect2), line2);
+
+    lv_obj_align(g_uwInspect, LV_ALIGN_TOP_MID, 0, y0 + (UW_H - UW_TITLE_H - 56) / 2);
+    lv_obj_clear_flag(g_uwInspect, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Toque num quadrado: repouso -> abre a inspecao do dia; inspecao -> sai
+// (navegar entre dias sai e toca de novo, decisao do DEFINE).
+void usage_cell_cb(lv_event_t *e) {
+    if (!g_uwBuilt) return;
+    const int d = (int)(intptr_t)lv_event_get_user_data(e);
+    if (g_uwInspectDay >= 0) {
+        usage_exit_inspection();
+        return;
+    }
+    g_uwInspectDay = (int8_t)d;
+    update_usage_widget();
+}
+
+// Toque no card (vaos/titulo) ou na barra: sai da inspecao. Repouso: nada.
+void usage_card_cb(lv_event_t *e) {
+    (void)e;
+    if (g_uwInspectDay >= 0) usage_exit_inspection();
+}
+
+void usage_exit_inspection() {
+    g_uwInspectDay = -1;
+    lv_obj_add_flag(g_uwInspect, LV_OBJ_FLAG_HIDDEN);
+    update_usage_widget();
+}
+
+// Seta: unica via entre heatmap e podio; sai da inspecao ao trocar.
+void usage_arrow_cb(lv_event_t *e) {
+    (void)e;
+    if (!g_uwBuilt) return;
+    g_uwInspectDay = -1;
+    g_uwView = (g_uwView + 1) % 2;
+    update_usage_widget();
 }
 
 // ---------------------------------------------------------------- updates
@@ -561,188 +915,6 @@ void update_session_card(int i) {
     set_text_if(c.nameLabel, c.cName, sizeof(c.cName), shortName);
 }
 
-void update_tokens_card() {
-    char buf[16];
-    if (usageStats.valid) format_tokens(usageStats.tokensToday, buf, sizeof(buf));
-    else                  snprintf(buf, sizeof(buf), "--");
-    set_text_if(g_tokValue, g_cTok, sizeof(g_cTok), buf);
-
-    char sess[16];
-    if (usageStats.valid && usageStats.stale) snprintf(sess, sizeof(sess), "dados stale");
-    else if (usageStats.valid) snprintf(sess, sizeof(sess), "%u ativas 12h", usageStats.active12h);
-    else                  sess[0] = '\0';
-    set_text_if(g_tokSessions, g_cTokSess, sizeof(g_cTokSess), sess);
-}
-
-// Cor do percentual de cota. Tres significados que nao podem se confundir: apagado =
-// nao ha dado, roxo = o dado existe mas esta velho (cota velha engana mais que a
-// ausencia dela), ambar/vermelho = a cota esta subindo.
-uint32_t quota_color(uint16_t pct, bool stale) {
-    if (stale)                          return theme::COLOR_STALE;
-    if (pct >= theme::QUOTA_ALERT_PCT)  return theme::COLOR_CTX_ALERT;
-    if (pct >= theme::QUOTA_WARN_PCT)   return theme::COLOR_PERM;
-    return theme::COLOR_TEXT;
-}
-
-void update_quota_cards() {
-    const QuotaStats &q = usageStats.quota;
-    const bool stale = usageStats.stale;
-    const uint8_t win = q.windowH ? q.windowH : 5;
-    // A janela vai no titulo dos DOIS cards. Rotular so um deixaria a duvida de se o
-    // outro numero e da mesma janela — e a comparacao lado a lado depende disso.
-    char title[12], value[8], sub[14];
-
-    // --- Codex: numero oficial, com a janela semanal no rodape ---
-    const bool cxOk = usageStats.valid && q.codexOk;
-    snprintf(title, sizeof(title), "codex %uh", (unsigned)win);
-    set_text_if(g_qCxTitle, g_cQCxTitle, sizeof(g_cQCxTitle), title);
-
-    // "Oficial" nao implica "atual". O rollout so cresce enquanto o Codex CLI roda; se
-    // o consumo acontece por outra superficie, o ultimo numero fica parado e envelhece
-    // em silencio. Passada a janela de frescor, o rodape troca a semanal pela IDADE da
-    // leitura — a pergunta que importa deixa de ser "quanto" e passa a ser "de quando".
-    const bool cxAged = cxOk && q.codexAgeS > theme::QUOTA_FRESH_S;
-    if (cxOk) {
-        snprintf(value, sizeof(value), "%u%%", (unsigned)q.codexH5Pct);
-        if (cxAged) {
-            char idade[8];
-            format_elapsed(q.codexAgeS, idade, sizeof(idade));
-            snprintf(sub, sizeof(sub), "ha %s", idade);
-        } else {
-            snprintf(sub, sizeof(sub), "sem %u%%", (unsigned)q.codexWeekPct);
-        }
-    } else {
-        snprintf(value, sizeof(value), "--");
-        // Sem dado o rodape diz POR QUE, em vez de sumir: "sem rollout" aponta para o
-        // Codex nao ter rodado nesta maquina, que e uma causa acionavel.
-        snprintf(sub, sizeof(sub), "sem rollout");
-    }
-    set_text_if(g_qCxValue, g_cQCxValue, sizeof(g_cQCxValue), value);
-    set_text_if(g_qCxSub, g_cQCxSub, sizeof(g_cQCxSub), sub);
-    set_color_if(g_qCxValue, g_cQCxColor,
-                 cxOk ? quota_color(q.codexH5Pct, stale || cxAged) : theme::COLOR_TEXT_DIM,
-                 lv_obj_set_style_text_color);
-
-    // --- Card de consumo ROTATIVO (toque cicla claude -> opencode -> codex) ---
-    // Estimados mostram tokens crus (ou ~% com teto declarado, so Claude); o Codex
-    // entra aqui na janela SEMANAL oficial, que o card fixo ao lado nao cobre —
-    // assim a rotacao nao repete o mesmo numero duas vezes na tela.
-    const bool clOk = usageStats.valid && q.claudeOk;
-    const bool ocOk = usageStats.valid && q.opencodeOk;
-    const bool cxRotOk = usageStats.valid && q.codexOk;
-    switch (g_quotaRot) {
-        case QUOTA_ROT_OPENCODE: {
-            snprintf(title, sizeof(title), "opencode %uh", (unsigned)win);
-            if (ocOk) {
-                format_tokens(q.opencodeTokens, value, sizeof(value));
-                snprintf(sub, sizeof(sub), "estimado");
-            } else {
-                snprintf(value, sizeof(value), "--");
-                snprintf(sub, sizeof(sub), "sem uso 5h");
-            }
-            break;
-        }
-        case QUOTA_ROT_CODEX: {
-            snprintf(title, sizeof(title), "codex sem");
-            if (cxRotOk) {
-                snprintf(value, sizeof(value), "%u%%", (unsigned)q.codexWeekPct);
-                // Mesma regra de frescor do card fixo: numero oficial parado e um
-                // numero de outro dia; a idade no rodape evita a leitura errada.
-                const bool aged = q.codexAgeS > theme::QUOTA_FRESH_S;
-                if (aged) {
-                    char idade[8];
-                    format_elapsed(q.codexAgeS, idade, sizeof(idade));
-                    snprintf(sub, sizeof(sub), "ha %s", idade);
-                } else {
-                    snprintf(sub, sizeof(sub), "oficial");
-                }
-            } else {
-                snprintf(value, sizeof(value), "--");
-                snprintf(sub, sizeof(sub), "sem rollout");
-            }
-            break;
-        }
-        default: {  // QUOTA_ROT_CLAUDE
-            snprintf(title, sizeof(title), "claude %uh", (unsigned)win);
-            if (clOk) {
-                if (q.claudePct > 0) snprintf(value, sizeof(value), "~%u%%", (unsigned)q.claudePct);
-                else                 format_tokens(q.claudeTokens, value, sizeof(value));
-                snprintf(sub, sizeof(sub), "estimado");
-            } else {
-                snprintf(value, sizeof(value), "--");
-                sub[0] = '\0';
-            }
-            break;
-        }
-    }
-    set_text_if(g_qClTitle, g_cQClTitle, sizeof(g_cQClTitle), title);
-    set_text_if(g_qClValue, g_cQClValue, sizeof(g_cQClValue), value);
-    set_text_if(g_qClSub, g_cQClSub, sizeof(g_cQClSub), sub);
-    // Valor sempre roxo: junto com a seta, marca o card como o rotativo. Perde os
-    // limiares amber/vermelho, mas o usuario escolheu a leitura unica de "este numero
-    // e uma escolha minha, giravel" sobre semaforo por limite.
-    set_color_if(g_qClValue, g_cQClColor, theme::COLOR_STALE, lv_obj_set_style_text_color);
-}
-
-void update_heatmap() {
-    uint32_t peak = 1;
-    for (int i = 0; i < SPARK_BUCKETS; i++)
-        if (usageStats.spark[i] > peak) peak = usageStats.spark[i];
-
-    const bool hourChanged = (usageStats.sparkEndHour != g_cHmEndHour);
-    g_cHmEndHour = usageStats.sparkEndHour;
-
-    for (int i = 0; i < SPARK_BUCKETS; i++) {
-        const uint32_t v = usageStats.valid ? usageStats.spark[i] : 0;
-
-        // Intensidade proporcional ao pico, com piso: com amplitude de 10x uma escala
-        // linear pura deixaria as horas menores quase invisiveis. Hora sem uso vira um
-        // bloco apagado, que e justamente o que faz o heatmap funcionar com dado esparso.
-        uint32_t opa;
-        uint32_t color;
-        if (v == 0) {
-            opa = LV_OPA_COVER;
-            color = theme::COLOR_IDLE;
-        } else {
-            opa = theme::HM_MIN_OPA +
-                  (uint32_t)((uint64_t)v * (LV_OPA_COVER - theme::HM_MIN_OPA) / peak);
-            color = usageStats.stale ? theme::COLOR_STALE : theme::COLOR_ACCENT;
-        }
-        const uint32_t key = (color << 8) | (opa & 0xFF);
-        if (key != g_cHmOpa[i]) {
-            g_cHmOpa[i] = key;
-            lv_obj_set_style_bg_color(g_hmCell[i], theme::color(color), 0);
-            lv_obj_set_style_bg_opa(g_hmCell[i], (lv_opa_t)opa, 0);
-        }
-
-        // Rotulo em milhoes; hora sem uso vira "0" seco, nao "0.0" — a casa decimal so
-        // existe para diferenciar valores, e nao ha o que diferenciar em zero.
-        char val[6];
-        if (v == 0) {
-            snprintf(val, sizeof(val), "0");
-        } else {
-            snprintf(val, sizeof(val), "%lu.%lu",
-                     (unsigned long)(v / 1000000UL),
-                     (unsigned long)((v / 100000UL) % 10));
-        }
-        g_cHmValue[i] = v;
-        set_text_if(g_hmValue[i], g_cHmValueTxt[i], sizeof(g_cHmValueTxt[i]), val);
-
-        // Hora do balde: o ultimo e sparkEndHour, os anteriores voltam uma hora cada.
-        if (hourChanged) {
-            const int h = ((int)usageStats.sparkEndHour - (SPARK_BUCKETS - 1 - i) + 240) % 24;
-            char hr[4];
-            snprintf(hr, sizeof(hr), "%02d", h);
-            set_text_if(g_hmHour[i], g_cHmHourTxt[i], sizeof(g_cHmHourTxt[i]), hr);
-            // A hora corrente fica destacada para dar referencia temporal.
-            lv_obj_set_style_text_color(g_hmHour[i],
-                theme::color(i == SPARK_BUCKETS - 1 ? theme::COLOR_TEXT_DIM
-                                                    : theme::COLOR_TEXT_FAINT), 0);
-        }
-    }
-}
-
-// Uma linha "rotulo   valor" da tela de detalhe.
 lv_obj_t *detail_row(lv_obj_t *parent, const char *caption, int16_t y,
                      lv_obj_t **capOut = nullptr) {
     lv_obj_t *cap = make_label(parent, &lv_font_montserrat_14, theme::COLOR_TEXT_FAINT);
@@ -1000,6 +1172,38 @@ void update_alert() {
 
 } // namespace
 
+// Exposto para o GET /diag (session_transport): prova que o historico chegou e
+// qual visao esta ativa, sem depender de impressao visual na tela.
+uint8_t ui_dashboard_usage_view() { return g_uwView; }
+
+void ui_dashboard_usage_debug(int *built, int *x, int *y, uint32_t *color) {
+    *built = g_uwBuilt ? 1 : 0;
+    *x = g_uwCell[USAGE_DAYS - 1] ? lv_obj_get_x(g_uwCell[USAGE_DAYS - 1]) : -1;
+    *y = g_uwCell[USAGE_DAYS - 1] ? lv_obj_get_y(g_uwCell[USAGE_DAYS - 1]) : -1;
+    *color = g_cUwCell[USAGE_DAYS - 1];
+}
+
+// Estado REAL no LVGL da celula de hoje: coords absolutas de tela, cor efetiva,
+// flags de visibilidade e clicabilidade (diagnostico do card "vazio").
+void ui_dashboard_usage_debug2(int *heatVisible, int *podioVisible, int *absX,
+                               int *absY, uint32_t *realColor, int *cellClickable) {
+    lv_obj_t *cell = g_uwCell[USAGE_DAYS - 1];
+    if (!cell || !g_uwBuilt) {
+        *heatVisible = *podioVisible = *absX = *absY = *cellClickable = -1;
+        *realColor = 0;
+        return;
+    }
+    *heatVisible = lv_obj_has_flag(g_uwHeatmap, LV_OBJ_FLAG_HIDDEN) ? 0 : 1;
+    *podioVisible = lv_obj_has_flag(g_uwPodio, LV_OBJ_FLAG_HIDDEN) ? 0 : 1;
+    lv_area_t a;
+    lv_obj_get_coords(cell, &a);
+    *absX = a.x1;
+    *absY = a.y1;
+    lv_color_t c = lv_obj_get_style_bg_color(cell, LV_PART_MAIN);
+    *realColor = lv_color_to_u32(c);
+    *cellClickable = lv_obj_has_flag(cell, LV_OBJ_FLAG_CLICKABLE) ? 1 : 0;
+}
+
 void ui_dashboard_init() {
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, theme::color(theme::COLOR_BG), 0);
@@ -1015,9 +1219,7 @@ void ui_dashboard_init() {
                            theme::GRID_TOP + row * theme::ROW_STEP);
     }
 
-    build_tokens_card(scr);
-    build_quota_cards(scr);
-    build_heatmap_card(scr);
+    build_usage_widget(scr);
     build_detail_screen(scr);
     build_picker(scr);
 
@@ -1027,9 +1229,7 @@ void ui_dashboard_init() {
 void ui_dashboard_update() {
     update_header();
     for (int i = 0; i < theme::SESSION_CARDS; i++) update_session_card(i);
-    update_tokens_card();
-    update_quota_cards();
-    update_heatmap();
+    update_usage_widget();
     update_alert();
 
     // Detalhe segue a identidade, nao o slot. Reordem atualiza a mesma sessao; remocao

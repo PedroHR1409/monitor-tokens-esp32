@@ -108,3 +108,27 @@ struct UsageStats {
     bool     stale;
     uint32_t lastUpdateMillis;
 };
+
+// Historico diario de consumo (todas as fontes somadas), do payload aditivo
+// stats.history.daily. valid=false = payload nao trouxe o bloco (daemon legado).
+#define USAGE_DAYS 30
+struct UsageHistory {
+    uint32_t daily[USAGE_DAYS];      // tokens por dia local, oldest-first
+    bool     valid;
+};
+
+// Podio por agente (stats.usage.top, aditivo): total do provider e top N sessoes
+// ordenadas por gasto. O id da sessao vem no payload e nao e guardado — a UI so
+// exibe nome/tokens (deep-link fica para o /iterate).
+#define TOP_SESSIONS 6
+#define USAGE_PERIODS 3                 // d1, d7, d30
+struct ProviderTop {
+    uint32_t total;                     // soma COMPLETA das sessoes do provider
+    uint8_t  count;                     // sessoes recebidas (<= TOP_SESSIONS)
+    char     names[TOP_SESSIONS][26];
+    uint32_t tokens[TOP_SESSIONS];
+};
+struct UsageTop {
+    ProviderTop providers[USAGE_PERIODS][3];   // [periodo][claude|codex|opencode]
+    bool valid;
+};

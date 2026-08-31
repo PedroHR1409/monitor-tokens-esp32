@@ -95,6 +95,14 @@ constexpr uint32_t CTX_BLINK_PERIOD_MS  = 500;
 constexpr uint32_t COLOR_CTX_ALERT      = 0xEF4444;  // vermelho
 constexpr uint32_t COLOR_CTX_ALERT_BG   = 0x4A1D1D;  // fundo tingido de vermelho
 
+// Paleta GitHub (dark) do heatmap de consumo diario — exatamente os 5 verdes do
+// grafico de contribuicoes. Nomes HM_* para nao colidir com futuros temas.
+constexpr uint32_t HM_EMPTY = 0x161B22;   // dia sem uso
+constexpr uint32_t HM_L1    = 0x0E4429;
+constexpr uint32_t HM_L2    = 0x006D32;
+constexpr uint32_t HM_L3    = 0x26A641;
+constexpr uint32_t HM_L4    = 0x39D353;   // pico da janela
+
 // --- Cota quase no teto ---
 // So COR, sem piscar: a cota se esgota em horas, nao em segundos, e nao ha nada a
 // fazer no instante em que ela cruza o limiar. Piscar aqui competiria com o `perm`,

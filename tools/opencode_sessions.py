@@ -76,6 +76,14 @@ def _rows(db: Path, query: str, params: tuple = ()) -> list[dict]:
 
 
 def _project_name(session: dict) -> str:
+    """Nome do PROJETO (mesma regra dos outros agentes): pasta do `directory`.
+
+    O `title` do OpenCode e a primeira mensagem/resumo ("New session - ..."), que
+    nao identifica o projeto — so entra como fallback quando nao ha directory.
+    """
+    directory = str(session.get("directory") or "")
+    if directory.strip() and Path(directory).name.strip():
+        return strip_accents(Path(directory).name)[:FULL_NAME_MAX]
     title = strip_accents(str(session.get("title") or ""))[:FULL_NAME_MAX]
     if title.strip():
         return title.strip()
@@ -186,6 +194,37 @@ def window_tokens(database: Path | None, since_epoch: float | None = None) -> in
                      (0 if since_epoch is None else int(since_epoch * 1000),))
     total, _ = _message_totals(messages, None)
     return total
+
+
+def turn_token_events(database: Path | None, since: datetime | None = None):
+    """Pares (datetime_utc, tokens) por turno do OpenCode, mais antigo primeiro.
+
+    Mesma semântica do tokensWin (input+output+reasoning+cache.write); consumido
+    pelo backfill do histórico diário. `since` filtra por time_created."""
+    params: tuple = ()
+    query = "SELECT data, time_created FROM message"
+    if since is not None:
+        query += " WHERE time_created >= ?"
+        params = (int(since.timestamp() * 1000),)
+    for message in _rows(database if database is not None else db_path(), query, params):
+        data = message.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+        if not isinstance(data, dict) or data.get("role") != "assistant":
+            continue
+        tokens = data.get("tokens") or {}
+        if not isinstance(tokens, dict):
+            continue
+        cache = tokens.get("cache") or {}
+        total = (int(tokens.get("input") or 0) + int(tokens.get("output") or 0)
+                 + int(tokens.get("reasoning") or 0) + int(cache.get("write") or 0))
+        if total <= 0:
+            continue
+        created = message.get("time_created") or 0
+        yield datetime.fromtimestamp(created / 1000.0, tz=timezone.utc), total
 
 
 def count_active_12h(database: Path | None, now: datetime, window_s: float) -> int:

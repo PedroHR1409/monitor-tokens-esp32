@@ -57,6 +57,14 @@ class ProductionContractsTests(unittest.TestCase):
         self.assertIn("g_pickerRenderedId", ui)
         self.assertIn("find_session_by_id(selectedId)", ui)
 
+    def test_usage_widget_has_title_arrow_and_no_card_longpress(self):
+        ui = (ROOT / "src" / "ui" / "ui_dashboard.cpp").read_text(encoding="utf-8")
+        self.assertIn("CONSUMO DE TOKENS (EM MM)", ui)          # unidade no titulo
+        self.assertIn("COL_X[3] = {22, 102, 182}", ui)          # podio 2|1|3
+        self.assertIn("usage_arrow_cb", ui)                     # seta = unica via ao podio
+        # long-press no card foi removido (podio agora e so pela seta)
+        self.assertNotIn("usage_widget_toggle_cb, LV_EVENT_LONG_PRESSED", ui)
+
     def test_mutating_http_routes_require_token_size_limit_and_payload_epoch(self):
         transport = (ROOT / "src" / "sessions" / "session_transport.cpp").read_text(encoding="utf-8")
         daemon = (ROOT / "tools" / "session_daemon.py").read_text(encoding="utf-8")
