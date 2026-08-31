@@ -34,7 +34,8 @@ from session_hook import hook_health, load_event_store
 from session_meta import CODEX_SESSIONS, codex_meta, read_git_branch, context_usage
 from usage_tracker import collect as collect_usage, collect_series, session_tokens
 from quota import collect as collect_quota
-from opencode_sessions import (count_active_12h as count_opencode_12h,
+from opencode_sessions import (LOG_PATH as OPENCODE_LOG_PATH,
+                               count_active_12h as count_opencode_12h,
                                db_path as opencode_default_db,
                                scan_opencode_sessions, window_tokens)
 import usage_history
@@ -474,7 +475,8 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
                      hidden: set | None = None, pinned: set | None = None,
                      opencode_db: Path | None = None,
                      opencode_ctx_window: int = 0,
-                     history_db: Path | None = None) -> dict:
+                     history_db: Path | None = None,
+                     opencode_log_path: Path | None = None) -> dict:
     """Payload legÃ­vel pelo firmware v1 durante a migraÃ§Ã£o do protocolo.
 
     `opencode_db=None` desliga a coleta do OpenCode (tests hermeticos); o daemon
@@ -491,7 +493,8 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
              + scan_codex_sessions(codex_index, now, token_since))
     if opencode_db is not None:
         todas += scan_opencode_sessions(now, token_since, database=opencode_db,
-                                        ctx_window=opencode_ctx_window)
+                                        ctx_window=opencode_ctx_window,
+                                        log_path=opencode_log_path)
     todas = filter_dismissed(todas, dismissed)
     visiveis = [s for s in todas if s["id"] not in hidden]
 
@@ -586,13 +589,14 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
                      now: datetime | None = None, hidden: set | None = None,
                      pinned: set | None = None, opencode_db: Path | None = None,
                      opencode_ctx_window: int = 0,
-                     history_db: Path | None = None) -> dict:
+                     history_db: Path | None = None,
+                     opencode_log_path: Path | None = None) -> dict:
     """Projeta os dados normalizados atuais no envelope estÃ¡vel do protocolo v2."""
     generated = now or datetime.now(timezone.utc)
     v1 = build_payload_v1(claude_dir, codex_index, max_sessions, tz, generated,
                           hidden=hidden, pinned=pinned, opencode_db=opencode_db,
                           opencode_ctx_window=opencode_ctx_window,
-                          history_db=history_db)
+                          history_db=history_db, opencode_log_path=opencode_log_path)
     legacy_stats = v1["stats"]
     series = collect_series(claude_dir, CODEX_SESSIONS, tz, generated)
     usage = {"series": [{"provider": item.provider, "buckets": dict(item.buckets),
@@ -725,12 +729,14 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
             opencode_db = None
         ctx_window = config.usage.opencode_context_window
         history_db = Path(config.storage.database_path)
+        opencode_log_path = OPENCODE_LOG_PATH
         if args.protocol == 1:
             payload = build_payload_v1(claude_dir, codex_index, args.max_sessions, tz,
                                        hidden=hidden, pinned=pinned,
                                        opencode_db=Path(opencode_db) if opencode_db else None,
                                        opencode_ctx_window=ctx_window,
-                                       history_db=history_db)
+                                       history_db=history_db,
+                                       opencode_log_path=opencode_log_path)
             st = payload["stats"]
         else:
             sequence += 1
@@ -739,7 +745,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                 device_id=device_id, daemon_instance_id=daemon_instance_id,
                 sequence=sequence, hidden=hidden, pinned=pinned,
                 opencode_db=Path(opencode_db) if opencode_db else None,
-                opencode_ctx_window=ctx_window, history_db=history_db)
+                opencode_ctx_window=ctx_window, history_db=history_db,
+                opencode_log_path=opencode_log_path)
             st = payload["stats"]["usage"]
         today_tokens = usage_total_for_log(st)
         status = post_sessions(url, payload, timeout=config.transport.timeout_s,

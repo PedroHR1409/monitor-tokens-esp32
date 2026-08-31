@@ -323,6 +323,78 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
             sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
         self.assertEqual("ask", sessions[0]["state"])
 
+    def _write_log(self, path: Path, lines: list[str]) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+        return path
+
+    def test_perm_detected_via_log_and_mapped_to_session(self):
+        """AC: ask no log (run mapeado a sessao) + sem atividade posterior = perm."""
+        with tempfile.TemporaryDirectory() as tmp:
+            scan_now = datetime(2026, 8, 31, 18, 32, 0, tzinfo=timezone.utc)
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-log", scan_now - timedelta(seconds=90)),
+            ], [])
+            log = self._write_log(Path(tmp) / "opencode.log", [
+                "timestamp=2026-08-31T18:30:00.000Z level=INFO run=abc "
+                "message=process session.id=ses-log messageID=m1",
+                "timestamp=2026-08-31T18:31:00.000Z level=INFO run=abc "
+                'message=evaluated permission=external_directory pattern="C:/tmp/*" '
+                "action.permission=external_directory action.pattern=* action.action=ask",
+            ])
+            sessions = opencode_sessions.scan_opencode_sessions(
+                scan_now, database=db, log_path=log)
+        self.assertEqual("perm", sessions[0]["state"])
+
+    def test_approval_after_ask_returns_to_work(self):
+        """AT: aprovacao gera atividade da sessao DEPOIS do ask -> work."""
+        with tempfile.TemporaryDirectory() as tmp:
+            scan_now = datetime(2026, 8, 31, 18, 32, 0, tzinfo=timezone.utc)
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-log", scan_now - timedelta(seconds=20)),
+            ], [])
+            log = self._write_log(Path(tmp) / "opencode.log", [
+                "timestamp=2026-08-31T18:31:00.000Z level=INFO run=abc "
+                "message=evaluated permission=bash pattern=\"ls\" "
+                "action.permission=bash action.pattern=* action.action=ask",
+            ])
+            # session atualizada DEPOIS do ask (aprovada e executou)
+            con = sqlite3.connect(db)
+            con.execute("UPDATE session SET time_updated=? WHERE id=?",
+                        (int((scan_now - timedelta(seconds=5)).timestamp() * 1000), "ses-log"))
+            con.commit(); con.close()
+            sessions = opencode_sessions.scan_opencode_sessions(
+                scan_now, database=db, log_path=log)
+        self.assertNotEqual("perm", sessions[0]["state"])
+
+    def test_ask_expired_does_not_stick(self):
+        """AT: ask com mais de 10 min nao fica preso em perm."""
+        with tempfile.TemporaryDirectory() as tmp:
+            scan_now = datetime(2026, 8, 31, 18, 32, 0, tzinfo=timezone.utc)
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-log", scan_now - timedelta(seconds=20)),
+            ], [])
+            log = self._write_log(Path(tmp) / "opencode.log", [
+                "timestamp=2026-08-31T18:10:00.000Z level=INFO run=abc "
+                "message=evaluated permission=bash pattern=\"ls\" "
+                "action.permission=bash action.pattern=* action.action=ask",
+            ])
+            scan_now = datetime(2026, 8, 31, 18, 32, 0, tzinfo=timezone.utc)
+            sessions = opencode_sessions.scan_opencode_sessions(
+                scan_now, database=db, log_path=log)
+        self.assertNotEqual("perm", sessions[0]["state"])
+
+    def test_log_missing_or_truncated_is_safe(self):
+        """AT: log ausente ou linha truncada -> sem erro, sem perm."""
+        self.assertEqual({}, opencode_sessions.perm_signals_from_log(
+            Path("Z:/nao/existe.log"), NOW))
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "opencode.log"
+            log.write_text('timestamp=2026-08-31T18:31:00.000Z level=INFO run=abc '
+                           'message=evaluated permission=external_directory '
+                           'pattern="C:/tmp/*" action.perm', encoding="utf-8")
+            self.assertEqual({}, opencode_sessions.perm_signals_from_log(log, NOW))
+
     def test_missing_database_returns_empty(self):
         self.assertEqual([], opencode_sessions.scan_opencode_sessions(
             NOW, database=Path("Z:/inexistentes/opencode.db")))

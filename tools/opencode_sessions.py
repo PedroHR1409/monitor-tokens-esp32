@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,6 +35,11 @@ SIGNAL_MAX_AGE_S = 3600.0
 # 584k tokens exibidos como 58% -> glm-5.3-flash ~ 1M). Override por
 # usage.opencode_context_window no monitor.toml (vale para todas as sessoes).
 DEFAULT_CONTEXT_WINDOW = 128000
+# Fonte do sinal `perm`: o log do OpenCode registra cada avaliacao de permissao
+# ("evaluated permission=... action.action=ask"). Tail de 512KB por ciclo.
+LOG_PATH = Path.home() / ".local" / "share" / "opencode" / "log" / "opencode.log"
+LOG_TAIL_BYTES = 512 * 1024
+PERM_FRESH_S = 600.0
 MODEL_CONTEXT_WINDOWS = (("glm", 1000000), ("deepseek", 128000))
 
 
@@ -144,12 +150,18 @@ def _message_totals(messages: list[dict], since_epoch: float | None) -> tuple[in
 
 
 def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
-                           database: Path | None = None, ctx_window: int = 0) -> list:
+                           database: Path | None = None, ctx_window: int = 0,
+                           log_path: Path | None = None) -> list:
     """Mesma forma do scan_claude_sessions/scan_codex_sessions: um dict por sessao."""
     db = database if database is not None else db_path()
     sessions = _rows(db, "SELECT * FROM session WHERE time_archived IS NULL "
                          "ORDER BY time_updated DESC")
     signals = session_structured_states(db, now - timedelta(seconds=SIGNAL_WINDOW_S))
+    if log_path is not None:
+        for psid, ask_ts in perm_signals_from_log(log_path, now).items():
+            current = signals.get(psid)
+            if current is None or ask_ts > current[1]:
+                signals[psid] = ("perm", ask_ts)
     if not sessions:
         return []
 
@@ -179,11 +191,18 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
         state = "work" if age <= WORK_MAX_AGE_S else "free"
         state_age = age
         signal = signals.get(sid)
+        if signal and signal[0] == "perm":
+            # A aprovacao/negacao gera atividade imediata (parts/session updated):
+            # se a sessao evoluiu DEPOIS do ask no log, o pedido ja foi resolvido.
+            if (session.get("time_updated") or 0) / 1000.0 > signal[1] + 5:
+                signal = None
         if signal:
             signal_state, signal_created = signal
+            # perm (log, write-once) expira em 10 min; ask (question) em 1h
+            max_age = PERM_FRESH_S if signal_state == "perm" else SIGNAL_MAX_AGE_S
             signal_age = max((now - datetime.fromtimestamp(signal_created, tz=timezone.utc))
                              .total_seconds(), 0.0)
-            if signal_age <= SIGNAL_MAX_AGE_S:
+            if signal_age <= max_age:
                 state = signal_state
                 state_age = signal_age
         window = context_window_for(model_id, provider_db, ctx_window)
@@ -265,6 +284,61 @@ def session_structured_states(database: Path | None, since: datetime) -> dict[st
         # invalida um sinal anterior.
         latest[row["session_id"]] = (signal or "", (row["time_updated"] or 0) / 1000.0)
     return {sid: value for sid, value in latest.items() if value[0]}
+
+
+def _between(line: str, start_marker: str, end_marker: str) -> str | None:
+    i = line.find(start_marker)
+    if i < 0:
+        return None
+    i += len(start_marker)
+    j = line.find(end_marker, i)
+    return line[i:j].strip() if j > i else line[i:].strip()
+
+
+def _log_ts(line: str) -> float | None:
+    raw = _between(line, "timestamp=", " level=")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def perm_signals_from_log(log_path: Path | None, now: datetime) -> dict[str, float]:
+    """{session_id: epoch_s} do ULTIMO pedido de permissao por sessao.
+
+    O OpenCode registra cada avaliacao no log ("evaluated permission=...
+    action.action=ask") mas nao persiste no SQLite. O mapeamento run->sessao vem
+    das linhas "process session.id=" (a atribuicao mais recente vence — runs
+    mudam de sessao entre turnos). Linhas sem match/invalidas sao ignoradas."""
+    path = Path(log_path) if log_path else LOG_PATH
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - LOG_TAIL_BYTES))
+            chunk = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return {}
+
+    run_map: dict[str, str] = {}
+    asks: dict[str, float] = {}
+    for line in chunk.splitlines():
+        if " message=process session.id=" in line:
+            run = _between(line, "run=", " message=process")
+            sid = _between(line, "session.id=", " messageID=")
+            if run and sid:
+                run_map[run] = sid
+        elif " message=evaluated permission=" in line and "action.action=ask" in line:
+            run = _between(line, "run=", " message=evaluated")
+            ts = _log_ts(line)
+            sid = run_map.get(run) if run else None
+            if sid and ts:
+                asks[sid] = max(asks.get(sid, 0.0), ts)
+    return asks
 
 
 def turn_token_events(database: Path | None, since: datetime | None = None):
