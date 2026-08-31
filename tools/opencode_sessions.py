@@ -232,9 +232,9 @@ def session_structured_states(database: Path | None, since: datetime) -> dict[st
     """Sinais estruturados de estado por sessao, do ULTIMO tool part de cada uma.
 
     A pergunta ao usuario deixa a tool `question` em "running" ate ser respondida
-    (estado `ask`); uma tool "pending" aguarda autorizacao (estado `perm`). Depois
-    da resposta/aprovacao o estado muda, entao o MAIS RECENTE tool part e o sinal.
-    Devolve {session_id: (estado, time_created_em_epoch_s)}."""
+    (estado `ask`). O pedido de PERMISSAO do OpenCode nao e persistido no SQLite
+    (tabela permission vazia e "pending" e estado de pipeline), entao `perm` nao e
+    detectavel por esta fonte. Devolve {session_id: (estado, epoch_s)}."""
     # Partes sao ATUALIZADAS IN-PLACE (mesmo id: pending -> running -> completed).
     # O estado real da sessao vem da parte com o maior time_updated — nunca de um
     # pending antigo que sobreviveu no historico (falso "perm" medido em 31/08).
@@ -252,12 +252,15 @@ def session_structured_states(database: Path | None, since: datetime) -> dict[st
         state = ((part.get("state") or {}).get("status") or "")
         tool = part.get("tool") or ""
         signal = None
-        if state == "pending":
-            signal = "perm"
-        elif tool == "question" and state == "running":
+        # "pending" NAO e perm: e estado de pipeline (tool criada antes de executar
+        # e atualizada in-place segundos depois) — mapear para perm gerava falso
+        # positivo durante trabalho normal (medido 31/08). E o pedido de PERMISSAO
+        # do OpenCode nao e persistido no SQLite (tabela permission vazia) — perm
+        # fica indisponivel para esta fonte ate um sinal persistido existir.
+        if tool == "question" and state == "running":
             signal = "ask"
         # O ULTIMO tool part vence SEMPRE (sinal ou nao) — um running posterior
-        # invalida um pending anterior.
+        # invalida um sinal anterior.
         latest[row["session_id"]] = (signal or "", (row["time_updated"] or 0) / 1000.0)
     return {sid: value for sid, value in latest.items() if value[0]}
 

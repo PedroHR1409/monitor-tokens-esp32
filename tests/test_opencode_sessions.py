@@ -246,8 +246,9 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
             sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
         self.assertEqual("ask", sessions[0]["state"])
 
-    def test_pending_tool_maps_to_perm(self):
-        """Tool pending = aguardando autorizacao."""
+    def test_pending_tool_is_pipeline_not_perm(self):
+        """pending = tool criada antes de executar (pipeline) — NAO e permissao.
+        Medido 31/08: partes ficam pending por segundos durante trabalho normal."""
         with tempfile.TemporaryDirectory() as tmp:
             db = _write_db(Path(tmp) / "opencode.db", [
                 _session("ses-perm", NOW - timedelta(seconds=20)),
@@ -257,7 +258,8 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
                               "state": {"status": "pending"}},
                              NOW - timedelta(seconds=15))
             sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
-        self.assertEqual("perm", sessions[0]["state"])
+        self.assertNotEqual("perm", sessions[0]["state"])
+        self.assertEqual("work", sessions[0]["state"])   # sessao ativa
 
     def test_stale_signal_falls_back_to_work(self):
         """Sinal velho (> 1h) nao trava o card em ask/perm."""
@@ -290,21 +292,22 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
             sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
         self.assertEqual("work", sessions[0]["state"])
 
-    def test_perm_detected_when_pending_is_latest(self):
+    def test_running_after_ask_keeps_ask(self):
+        """O ULTIMO tool part vence: ask continua se a pergunta segue aberta."""
         with tempfile.TemporaryDirectory() as tmp:
             db = _write_db(Path(tmp) / "opencode.db", [
-                _session("ses-perm2", NOW - timedelta(seconds=20)),
+                _session("ses-ask2", NOW - timedelta(seconds=20)),
             ], [])
-            self._write_part(db, "p1", "ses-perm2",
+            self._write_part(db, "p1", "ses-ask2",
                              {"type": "tool", "tool": "bash",
                               "state": {"status": "completed"}},
                              NOW - timedelta(minutes=10))
-            self._write_part(db, "p2", "ses-perm2",
-                             {"type": "tool", "tool": "edit",
-                              "state": {"status": "pending"}},
+            self._write_part(db, "p2", "ses-ask2",
+                             {"type": "tool", "tool": "question",
+                              "state": {"status": "running"}},
                              NOW - timedelta(seconds=10))
             sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
-        self.assertEqual("perm", sessions[0]["state"])
+        self.assertEqual("ask", sessions[0]["state"])
 
     def test_missing_database_returns_empty(self):
         self.assertEqual([], opencode_sessions.scan_opencode_sessions(
