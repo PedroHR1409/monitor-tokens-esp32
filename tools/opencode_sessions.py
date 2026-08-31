@@ -20,13 +20,16 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from session_state import strip_accents, WORK_MAX_AGE_S
+from session_state import session_display_name, strip_accents, WORK_MAX_AGE_S
 from session_meta import read_git_branch
 
 DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
 FULL_NAME_MAX = 38
 SOURCE_STALE_AFTER_S = 300.0
+# Janela tipica dos modelos GLM/DeepSeek usados no OpenCode. E uma APROXIMACAO:
+# override por usage.opencode_context_window no monitor.toml.
+DEFAULT_CONTEXT_WINDOW = 128000
 
 # providerID/modelID -> provedor do icone no firmware (src/assets/*_icon.png).
 PROVIDERS_BY_MODEL = (("glm", "zai"), ("deepseek", "deepseek"))
@@ -75,19 +78,19 @@ def _rows(db: Path, query: str, params: tuple = ()) -> list[dict]:
         con.close()
 
 
-def _project_name(session: dict) -> str:
-    """Nome do PROJETO (mesma regra dos outros agentes): pasta do `directory`.
+def _project_name(session: dict, branch: str) -> str:
+    """Nome do card pela regra unica: branch nao-principal vence o projeto.
 
-    O `title` do OpenCode e a primeira mensagem/resumo ("New session - ..."), que
-    nao identifica o projeto — so entra como fallback quando nao ha directory.
-    """
+    Projeto = pasta do `directory` (o `title` do OpenCode e a primeira mensagem/
+    resumo, que nao identifica o projeto) com fallback title/slug."""
     directory = str(session.get("directory") or "")
+    project = ""
     if directory.strip() and Path(directory).name.strip():
-        return strip_accents(Path(directory).name)[:FULL_NAME_MAX]
-    title = strip_accents(str(session.get("title") or ""))[:FULL_NAME_MAX]
-    if title.strip():
-        return title.strip()
-    return strip_accents(str(session.get("slug") or "opencode"))[:FULL_NAME_MAX]
+        project = strip_accents(Path(directory).name)[:FULL_NAME_MAX]
+    if not project:
+        project = (strip_accents(str(session.get("title") or "")).strip()
+                   or strip_accents(str(session.get("slug") or "opencode")))[:FULL_NAME_MAX]
+    return session_display_name(project, branch)[:FULL_NAME_MAX]
 
 
 def _message_totals(messages: list[dict], since_epoch: float | None) -> tuple[int, int]:
@@ -157,20 +160,23 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
         tokens_win, context_tokens = _message_totals(messages, since_epoch)
 
         state = "work" if age <= WORK_MAX_AGE_S else "free"
-        ctx_pct = (int(context_tokens * 100 / ctx_window)
-                   if ctx_window > 0 and context_tokens > 0 else 0)
+        window = ctx_window if ctx_window > 0 else DEFAULT_CONTEXT_WINDOW
+        ctx_quality = "measured" if ctx_window > 0 else "estimated"
+        ctx_pct = (min(100, int(context_tokens * 100 / window))
+                   if window > 0 and context_tokens > 0 else 0)
+        branch = strip_accents(read_git_branch(directory))[:20]
         out.append({
             "id": sid,
-            "project": _project_name(session),
-            "full": _project_name(session),
-            "branch": strip_accents(read_git_branch(directory))[:20],
+            "project": _project_name(session, branch),
+            "full": _project_name(session, branch),
+            "branch": branch,
             "model": short_model(model_id),
             "provider": provider_of(model_id, provider_db),
             "effort": strip_accents(str(model.get("variant") or ""))[:8],
             "tokensWin": tokens_win,
             "ctxPct": ctx_pct,
-            "context": {"value": ctx_pct if ctx_window > 0 else None,
-                        "quality": "measured" if ctx_window > 0 else "unknown",
+            "context": {"value": ctx_pct if window > 0 and context_tokens > 0 else None,
+                        "quality": ctx_quality if context_tokens > 0 else "unknown",
                         "unit": "percent"},
             "context_tokens": context_tokens,
             "tool": "opencode",
@@ -178,7 +184,7 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
             "elapsed": int(age),        # firmware exige uint64 no JSON (422 senao)
             "source_stale": age > SOURCE_STALE_AFTER_S and state == "work",
             "source_age_s": int(age),
-            "diagnostic": "" if ctx_window > 0 else "no_context_window",
+            "diagnostic": "" if ctx_window > 0 else "context_estimated",
             "_age": age,
         })
     return out

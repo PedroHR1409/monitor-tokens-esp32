@@ -13,7 +13,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from opencode_sessions import scan_opencode_sessions
-from session_state import strip_accents
+from session_meta import read_git_branch
+from session_state import session_display_name, strip_accents
 
 PERIODS = (("d1", 1), ("d7", 7), ("d30", 30))
 PROVIDERS = ("claude", "codex", "opencode")
@@ -65,7 +66,7 @@ def _entry(total: int, sessions: list[dict], top_n: int) -> dict:
 
 
 def _claude(projects_dir: Path, since: datetime, tz: timezone, top_n: int) -> dict:
-    from session_daemon import project_name_of, read_tail_json_objects
+    from session_daemon import meta_of, project_name_of, read_tail_json_objects
     from usage_tracker import session_tokens
 
     total = 0
@@ -90,8 +91,10 @@ def _claude(projects_dir: Path, since: datetime, tz: timezone, top_n: int) -> di
                 objs = read_tail_json_objects(path)
             except OSError:
                 objs = []
-            name = (project_name_of(objs, project.name, limit=NAME_MAX)
+            proj = (project_name_of(objs, project.name, limit=NAME_MAX)
                     if objs else project.name[:NAME_MAX])
+            branch, _, _ = meta_of(objs) if objs else ("", "", "")
+            name = session_display_name(proj, branch)[:NAME_MAX]
             sessions.append({"id": path.stem[:36], "name": name, "tokens": tokens})
     return _entry(total, sessions, top_n)
 
@@ -126,7 +129,9 @@ def _codex(index_path: Path, since: datetime, tz: timezone,
         if tokens <= 0:
             continue
         total += tokens
-        name = strip_accents(obj.get("thread_name") or "codex")[:NAME_MAX]
+        branch = strip_accents(read_git_branch(meta["cwd"]))[:NAME_MAX]
+        project = strip_accents(obj.get("thread_name") or "codex")[:NAME_MAX]
+        name = session_display_name(project, branch)[:NAME_MAX]
         sessions.append({"id": str(tid)[:36], "name": name, "tokens": tokens})
     return _entry(total, sessions, top_n)
 

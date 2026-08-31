@@ -820,3 +820,17 @@ Dois detalhes que a implementacao precisa respeitar:
 
 O balde do heatmap recebe o token na PRIMEIRA ocorrencia da mensagem, entao a hora
 atribuida e a do inicio da resposta.
+
+
+## 17. Dados OpenCode: worktrees, contexto e nomenclatura por branch
+
+- **Branch de worktree**: em worktrees, `.git` e um ARQUIVO (`gitdir: <repo>/.git/
+  worktrees/<nome>`). `read_git_branch` parseia o gitdir e le o HEAD de la — sessoes
+  Codex/OpenCode em worktrees mostram a branch correta (antes: "sem git").
+- **Contexto OpenCode**: default **128k** (aproximacao para GLM/DeepSeek), override
+  por `usage.opencode_context_window`. Qualidade da metrica: `estimated` no default,
+  `measured` com config. ctxPct limitado a 100.
+- **Nomenclatura do card** (regra unica Claude/Codex/OpenCode, `session_display_name`):
+  **branch** quando ela nao e `main`/`master`; **nome do projeto** quando e. Ex.:
+  `fix-28796-ajustes` (worktree), `feat/27816-remover-monolitico` (repo principal em
+  feature branch), `monitor-tokens-esp32` (master).

@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from session_state import (PERM_MARKER_MAX_AGE_S, conversational_events, infer_state,
-                           parse_ts, strip_accents)
+                           parse_ts, session_display_name, strip_accents)
 from agent_events import MAX_FUTURE_SKEW_S, reduce_session_events
 from session_hook import hook_health, load_event_store
 from session_meta import CODEX_SESSIONS, codex_meta, read_git_branch, context_usage
@@ -286,8 +286,9 @@ def scan_claude_sessions(projects_dir: Path, now: datetime,
         diagnostic = ",".join(snapshot.diagnostics)
         if parse_ts(convs[-1].get("timestamp")) is None:
             diagnostic = ",".join(filter(None, (diagnostic, "invalid_timestamp")))
-        full = project_name_of(objs, folder, limit=FULL_NAME_MAX)
         branch, model, effort = meta_of(objs)
+        full = session_display_name(
+            project_name_of(objs, folder, limit=FULL_NAME_MAX), branch)
         tokens_win = session_tokens(path, now - timedelta(seconds=SESSION_TOKEN_WINDOW_S))
         context = context_usage(objs)
         results.append({
@@ -351,10 +352,12 @@ def scan_codex_sessions(index_path: Path, now: datetime,
         diagnostic = ",".join(snapshot.diagnostics)
         if snapshot.last_event_at is None:
             diagnostic = "no_structured_event"
-        full = strip_accents(obj.get("thread_name") or "codex")[:FULL_NAME_MAX]
         # O indice do Codex so tem id/nome/updated_at; modelo, effort, cwd e uso de
         # tokens estao no rollout da sessao, que casa pelo id.
         cx = codex_meta(tid, token_since)
+        branch = strip_accents(read_git_branch(cx["cwd"]))[:20]
+        full = session_display_name(
+            strip_accents(obj.get("thread_name") or "codex")[:FULL_NAME_MAX], branch)
         context = cx["context"]
         out.append({
             "id": tid,
@@ -713,8 +716,13 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
     while True:
         hidden = fetch_id_list(base, "/hidden", "hidden", token=transport_token)
         pinned = fetch_id_list(base, "/pinned", "pinned", token=transport_token)
-        opencode_db = (Path(args.opencode_db) if getattr(args, "opencode_db", None)
-                       else opencode_default_db())
+        # CLI sempre tem o attr (argparse); SimpleNamespace de testes nao tem ->
+        # fica None para nao vazar o banco real do operador nos testes.
+        if hasattr(args, "opencode_db"):
+            opencode_db = (Path(args.opencode_db) if args.opencode_db
+                           else opencode_default_db())
+        else:
+            opencode_db = None
         ctx_window = config.usage.opencode_context_window
         history_db = Path(config.storage.database_path)
         if args.protocol == 1:

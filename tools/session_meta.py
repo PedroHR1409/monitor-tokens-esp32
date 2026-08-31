@@ -49,7 +49,21 @@ def read_git_branch(cwd: str | None) -> str:
     if not cwd:
         return ""                      # nem sabemos o diretorio
     base = Path(cwd)
-    head = base / ".git" / "HEAD"
+    git_entry = base / ".git"
+    head = git_entry / "HEAD"
+    if git_entry.is_file():
+        # Worktree: .git e um ARQUIVO ("gitdir: <repo>/.git/worktrees/<nome>") que
+        # aponta para o HEAD real da branch daquele worktree.
+        try:
+            raw_entry = git_entry.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return "sem git" if base.is_dir() else ""
+        if not raw_entry.startswith("gitdir:"):
+            return "sem git" if base.is_dir() else ""
+        gitdir = Path(raw_entry.split(":", 1)[1].strip())
+        if not gitdir.is_absolute():
+            gitdir = base / gitdir
+        head = gitdir / "HEAD"
     try:
         raw = head.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:

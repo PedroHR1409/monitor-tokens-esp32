@@ -63,6 +63,19 @@ def parse_ts(value) -> datetime | None:
     return parse_aware_timestamp(value)
 
 
+MAIN_BRANCHES = {"main", "master"}
+
+
+def session_display_name(project: str, branch: str) -> str:
+    """Nome do card: BRANCH quando ela e o que distingue o trabalho (fora de
+    main/master); nome do projeto quando a sessao esta na branch principal ou
+    fora de git. Regra unica para Claude/Codex/OpenCode."""
+    b = strip_accents(branch or "").strip()
+    if b and b.lower() not in MAIN_BRANCHES:
+        return b
+    return project
+
+
 def strip_accents(text: str) -> str:
     """Remove acentos: a fonte compilada no firmware so tem ASCII, entao 'migração'
     viraria 'migra??o' na tela. Ver docs/SPEC.md 8."""

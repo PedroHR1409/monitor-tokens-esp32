@@ -111,8 +111,8 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
         self.assertEqual("free", sessions[0]["state"])
         self.assertEqual(0, sessions[0]["tokensWin"])      # fora da janela
         self.assertEqual(900, sessions[0]["context_tokens"])
-        self.assertEqual(0, sessions[0]["ctxPct"])         # sem teto declarado
-        self.assertEqual("unknown", sessions[0]["context"]["quality"])
+        self.assertEqual(0, sessions[0]["ctxPct"])         # 900 tok << 128k default
+        self.assertEqual("estimated", sessions[0]["context"]["quality"])
 
     def test_inactive_for_a_day_is_dropped_and_git_branch_is_read(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -160,6 +160,48 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
         by_id = {s["id"]: s["project"] for s in sessions}
         self.assertEqual("monitor-tokens-esp32", by_id["ses-name"])
         self.assertEqual("Aula de revisao", by_id["ses-fb"])   # sem directory: title
+
+    def test_context_defaults_to_128k_and_clamps_at_100(self):
+        """AC: contexto OpenCode exibido por default (estimado), sem estourar 100%."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-ctx", NOW - timedelta(seconds=30)),
+            ], [_assistant("ses-ctx", NOW - timedelta(seconds=60),
+                           output=300000, cache_read=0)])
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        session = sessions[0]
+        self.assertEqual(100, session["ctxPct"])          # 300k >> 128k: clamp
+        self.assertEqual("estimated", session["context"]["quality"])
+
+    def test_context_override_respects_configured_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-ovr", NOW - timedelta(seconds=30)),
+            ], [_assistant("ses-ovr", NOW - timedelta(seconds=60),
+                           output=300000, cache_read=0)])
+            sessions = opencode_sessions.scan_opencode_sessions(
+                NOW, database=db, ctx_window=600000)
+        session = sessions[0]
+        self.assertEqual(50, session["ctxPct"])
+        self.assertEqual("measured", session["context"]["quality"])
+
+    def test_worktree_session_name_is_its_branch(self):
+        """AC: nome do card = branch nao-principal (regra unica das 3 fontes)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_git = root / "repo" / ".git" / "worktrees" / "fix-28796"
+            repo_git.mkdir(parents=True)
+            (repo_git / "HEAD").write_text("ref: refs/heads/fix-28796-ajustes" + chr(10))
+            wt = root / "wt"
+            wt.mkdir()
+            (wt / ".git").write_text(f"gitdir: {repo_git.as_posix()}" + chr(10))
+            db = _write_db(root / "opencode.db", [
+                _session("ses-wt", NOW - timedelta(seconds=30),
+                         title="New session - 2026-08-28T19:48:10.291Z",
+                         directory=str(wt)),
+            ], [])
+            sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
+        self.assertEqual("fix-28796-ajustes", sessions[0]["project"])
 
     def test_missing_database_returns_empty(self):
         self.assertEqual([], opencode_sessions.scan_opencode_sessions(

@@ -132,6 +132,10 @@ daemon nem o ESP32: a alteração aparece no próximo ciclo.
 
 ## Estado atual
 
+> Nomenclatura dos cards: sessoes em feature branch mostram a BRANCH (ex.
+> `feat/27816-remover-monolitico`); na principal, o nome do projeto. Contexto do
+> OpenCode em % (default 128k, ajustavel em `usage.opencode_context_window`).
+
 **Layout** — grid 3x3 + faixa larga, portrait 320x480:
 
 | | | |
