@@ -5,7 +5,7 @@
 | **Data** | 2026-08-29 |
 | **Executor** | build-agent (via OpenCode) |
 | **DESIGN** | `DESIGN_CARD7_INSPECAO.md` |
-| **Status** | ✅ Implementado, gravado na placa (validação visual pendente do operador) |
+| **Status** | ✅ Shipped |
 
 ## Implementado (100% `src/ui/ui_dashboard.cpp`)
 

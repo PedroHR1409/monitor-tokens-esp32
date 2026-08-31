@@ -10,7 +10,7 @@
 | **Feature** | VISUAL_PADRAO_PAINEL |
 | **Date** | 2026-08-29 |
 | **Author** | define-agent |
-| **Status** | Ready for Design |
+| **Status** | ✅ Shipped |
 | **Clarity Score** | 15/15 |
 | **Input** | `BRAINSTORM_VISUAL_PADRAO_PAINEL.md` (ACs redigidos pelo operador + 3 decisões (a/b/c)) |
 

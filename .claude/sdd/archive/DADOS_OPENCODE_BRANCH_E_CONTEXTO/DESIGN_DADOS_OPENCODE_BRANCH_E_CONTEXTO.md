@@ -10,7 +10,7 @@
 | **Date** | 2026-08-31 |
 | **Author** | design-agent |
 | **DEFINE** | [DEFINE_DADOS_OPENCODE_BRANCH_E_CONTEXTO.md](./DEFINE_DADOS_OPENCODE_BRANCH_E_CONTEXTO.md) |
-| **Status** | ✅ Complete (Built) |
+| **Status** | ✅ Shipped |
 | **Design Confidence** | 0,95 (bug reproduzido no filesystem; correção no padrão existente) |
 
 ---

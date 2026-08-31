@@ -9,7 +9,7 @@
 | **Feature** | VISUAL_PADRAO_PAINEL |
 | **Date** | 2026-08-29 |
 | **Author** | brainstorm-agent |
-| **Status** | ✅ Complete (Defined) |
+| **Status** | ✅ Shipped |
 | **Origem** | Requisito do operador com critérios de aceite já redigidos (AC 1-3) |
 
 ---

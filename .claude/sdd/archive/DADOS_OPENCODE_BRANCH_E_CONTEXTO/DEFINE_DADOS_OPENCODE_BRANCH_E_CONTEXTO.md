@@ -10,7 +10,7 @@
 | **Feature** | DADOS_OPENCODE_BRANCH_E_CONTEXTO |
 | **Date** | 2026-08-31 |
 | **Author** | define-agent |
-| **Status** | ✅ Complete (Designed) |
+| **Status** | ✅ Shipped |
 | **Clarity Score** | 15/15 |
 | **Input** | `BRAINSTORM_DADOS_OPENCODE_BRANCH_E_CONTEXTO.md` (com análise de dados reais) |
 

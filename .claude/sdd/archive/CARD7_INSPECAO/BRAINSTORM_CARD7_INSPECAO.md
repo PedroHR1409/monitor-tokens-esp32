@@ -9,7 +9,7 @@
 | **Feature** | CARD7_INSPECAO |
 | **Date** | 2026-08-29 |
 | **Author** | brainstorm-agent |
-| **Status** | ✅ Complete (Defined) |
+| **Status** | ✅ Shipped |
 | **Origem** | Iteração pós-build do `BRAINSTORM_WIDGET_UNIFICADO_CONSUMO` (feedback visual do operador) |
 
 ---

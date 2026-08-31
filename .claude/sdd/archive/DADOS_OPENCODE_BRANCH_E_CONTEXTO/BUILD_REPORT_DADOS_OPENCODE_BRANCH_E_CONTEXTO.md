@@ -5,7 +5,7 @@
 | **Data** | 2026-08-31 |
 | **Executor** | build-agent (via OpenCode) |
 | **DESIGN** | `DESIGN_DADOS_OPENCODE_BRANCH_E_CONTEXTO.md` |
-| **Status** | ✅ Implementado, validado (daemon; sem mudança de firmware) |
+| **Status** | ✅ Shipped |
 
 ## Implementado
 

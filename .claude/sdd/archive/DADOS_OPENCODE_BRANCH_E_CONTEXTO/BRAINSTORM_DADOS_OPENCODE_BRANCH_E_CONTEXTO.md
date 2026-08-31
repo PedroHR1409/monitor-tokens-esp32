@@ -9,7 +9,7 @@
 | **Feature** | DADOS_OPENCODE_BRANCH_E_CONTEXTO |
 | **Date** | 2026-08-31 |
 | **Author** | brainstorm-agent |
-| **Status** | ✅ Complete (Defined) |
+| **Status** | ✅ Shipped |
 | **Origem** | Relato do operador: branch incorreta, contexto vazio, nomes "misturados" nos worktrees |
 
 ---

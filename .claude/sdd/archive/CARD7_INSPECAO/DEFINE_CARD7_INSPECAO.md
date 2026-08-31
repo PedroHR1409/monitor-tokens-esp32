@@ -10,7 +10,7 @@
 | **Feature** | CARD7_INSPECAO |
 | **Date** | 2026-08-29 |
 | **Author** | define-agent |
-| **Status** | ✅ Complete (Designed) |
+| **Status** | ✅ Shipped |
 | **Clarity Score** | 15/15 |
 | **Input** | `BRAINSTORM_CARD7_INSPECAO.md` (brainstorm_document, pré-validado com mockups aprovados) |
 

@@ -10,7 +10,7 @@
 | **Date** | 2026-08-29 |
 | **Author** | design-agent |
 | **DEFINE** | [DEFINE_CARD7_INSPECAO.md](./DEFINE_CARD7_INSPECAO.md) |
-| **Status** | ✅ Complete (Built) |
+| **Status** | ✅ Shipped |
 | **Design Confidence** | 0,95 (padrões já validados no próprio arquivo em iteração anterior) |
 
 ---
