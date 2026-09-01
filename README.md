@@ -45,7 +45,11 @@ estruturados de hooks, com inferência por transcript como fallback.
 
 ## Demonstração
 
-> 📷 *Fotos e vídeo do painel em operação — adicionar aqui.*
+![Monitor.AI em operação — cards com estados reais, pódio e heatmap de consumo](docs/monitorai.jpg)
+
+*Painel em operação: card em `ask` (azul, pulsando) enquanto um agente aguarda
+resposta, sessões `free` nos worktrees, pódio de agentes e heatmap de consumo dos
+últimos 30 dias.*
 
 ## Hardware
 
