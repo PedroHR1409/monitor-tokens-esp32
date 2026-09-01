@@ -272,7 +272,7 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
                               "state": {"status": "running"}},
                              NOW - timedelta(hours=2))
             sessions = opencode_sessions.scan_opencode_sessions(NOW, database=db)
-        self.assertEqual("work", sessions[0]["state"])   # sessao ativa; sinal velho ignorado
+        self.assertEqual("ask", sessions[0]["state"])    # pergunta AINDA aberta = ask
 
     def test_newer_running_tool_invalidates_old_pending(self):
         """Bug medido 31/08: pending antigo sobrevivia e mostrava 'perm' com a

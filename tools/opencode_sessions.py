@@ -29,8 +29,8 @@ DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 FULL_NAME_MAX = 38
 SOURCE_STALE_AFTER_S = 300.0
 # Janela de busca dos sinais estruturados (ask/perm) e idade maxima do sinal.
-SIGNAL_WINDOW_S = 3600.0
 SIGNAL_MAX_AGE_S = 3600.0
+STATE_WINDOW_S = 24 * 3600            # janela da base de estados (a do board)
 # Janela de contexto POR MODELO (APROXIMACAO, validada contra o % do OpenCode:
 # 584k tokens exibidos como 58% -> glm-5.3-flash ~ 1M). Override por
 # usage.opencode_context_window no monitor.toml (vale para todas as sessoes).
@@ -156,7 +156,7 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
     db = database if database is not None else db_path()
     sessions = _rows(db, "SELECT * FROM session WHERE time_archived IS NULL "
                          "ORDER BY time_updated DESC")
-    signals = session_structured_states(db, now - timedelta(seconds=SIGNAL_WINDOW_S))
+    signals = session_structured_states(db, now - timedelta(seconds=STATE_WINDOW_S))
     if log_path is not None:
         for psid, ask_ts in perm_signals_from_log(log_path, now).items():
             current = signals.get(psid)
@@ -188,23 +188,22 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
                              "WHERE session_id = ?", (sid,))
         tokens_win, context_tokens = _message_totals(messages, since_epoch)
 
+        # Estado pelo ULTIMO part da sessao (work/free/ask) — sem expiracao: o
+        # ultimo evento E o estado. Fallback por idade so para sessao sem parts.
         state = "work" if age <= WORK_MAX_AGE_S else "free"
         state_age = age
         signal = signals.get(sid)
         if signal and signal[0] == "perm":
             # A aprovacao/negacao gera atividade imediata (parts/session updated):
             # se a sessao evoluiu DEPOIS do ask no log, o pedido ja foi resolvido.
-            if (session.get("time_updated") or 0) / 1000.0 > signal[1] + 5:
+            ask_age = (now - datetime.fromtimestamp(signal[1], tz=timezone.utc)).total_seconds()
+            expired = ask_age > PERM_FRESH_S
+            if (session.get("time_updated") or 0) / 1000.0 > signal[1] + 5 or expired:
                 signal = None
         if signal:
-            signal_state, signal_created = signal
-            # perm (log, write-once) expira em 10 min; ask (question) em 1h
-            max_age = PERM_FRESH_S if signal_state == "perm" else SIGNAL_MAX_AGE_S
-            signal_age = max((now - datetime.fromtimestamp(signal_created, tz=timezone.utc))
-                             .total_seconds(), 0.0)
-            if signal_age <= max_age:
-                state = signal_state
-                state_age = signal_age
+            state = signal[0]
+            state_age = max((now - datetime.fromtimestamp(signal[1], tz=timezone.utc))
+                            .total_seconds(), 0.0)
         window = context_window_for(model_id, provider_db, ctx_window)
         ctx_quality = "measured" if ctx_window > 0 else "estimated"
         ctx_pct = (min(100, int(context_tokens * 100 / window))
@@ -257,10 +256,11 @@ def session_structured_states(database: Path | None, since: datetime) -> dict[st
     # Partes sao ATUALIZADAS IN-PLACE (mesmo id: pending -> running -> completed).
     # O estado real da sessao vem da parte com o maior time_updated — nunca de um
     # pending antigo que sobreviveu no historico (falso "perm" medido em 31/08).
+    # Estado do ULTIMO part de cada sessao (por time_updated — as partes sao
+    # atualizadas in-place). Turno em execucao = work; turno encerrado = free.
     rows = _rows(database if database is not None else db_path(),
                  "SELECT session_id, data, time_updated FROM part "
-                 "WHERE time_updated >= ? AND json_extract(data, '$.type') = 'tool' "
-                 "ORDER BY time_updated ASC",
+                 "WHERE time_updated >= ? ORDER BY time_updated ASC",
                  (int(since.timestamp() * 1000),))
     latest: dict[str, tuple[str, float]] = {}
     for row in rows:
@@ -268,22 +268,30 @@ def session_structured_states(database: Path | None, since: datetime) -> dict[st
             part = json.loads(row["data"])
         except (json.JSONDecodeError, TypeError):
             continue
+        ptype = part.get("type") or ""
         state = ((part.get("state") or {}).get("status") or "")
         tool = part.get("tool") or ""
         signal = None
-        # "pending" NAO e perm nas tools em geral: e estado de pipeline (tool criada
-        # antes de executar e atualizada in-place segundos depois) — mapear para perm
-        # gerava falso positivo durante trabalho normal (medido 31/08). EXCECAO: a
-        # tool `question` em pending/running = pergunta aberta aguardando resposta
-        # (estado `ask`, validado ao vivo nos dois estados). E o pedido de PERMISSAO
-        # do OpenCode nao e persistido no SQLite (tabela permission vazia) — perm
-        # fica indisponivel para esta fonte ate um sinal persistido existir.
+        # `question` em pending/running = pergunta aberta aguardando resposta (ask,
+        # validado ao vivo nos dois estados). "pending" nas DEMAIS tools e estado de
+        # pipeline (a parte nasce pending e vira running) — nao e perm: o pedido de
+        # PERMISSAO do OpenCode nao e persistido no SQLite (tabela permission vazia).
         if tool == "question" and state in ("pending", "running"):
             signal = "ask"
-        # O ULTIMO tool part vence SEMPRE (sinal ou nao) — um running posterior
-        # invalida um sinal anterior.
-        latest[row["session_id"]] = (signal or "", (row["time_updated"] or 0) / 1000.0)
-    return {sid: value for sid, value in latest.items() if value[0]}
+        elif ptype == "tool" and state == "running":
+            signal = "work"                      # executando de fato
+        elif ptype == "tool" and state == "pending":
+            signal = "work"                      # criada, prestes a executar
+        elif ptype in ("step-start", "reasoning"):
+            signal = "work"                      # modelo pensando/executando
+        elif ptype in ("text", "step-finish"):
+            signal = "free"                      # turno encerrado, aguardando voce
+        elif ptype == "tool" and state == "completed":
+            signal = "free"                      # ultima tool fechou o turno
+        if signal:
+            # O ULTIMO part vence SEMPRE — um evento posterior invalida o anterior.
+            latest[row["session_id"]] = (signal, (row["time_updated"] or 0) / 1000.0)
+    return latest
 
 
 def _between(line: str, start_marker: str, end_marker: str) -> str | None:
