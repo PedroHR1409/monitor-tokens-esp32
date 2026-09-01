@@ -11,7 +11,7 @@
 | **Date** | 2026-08-31 |
 | **Author** | design-agent |
 | **DEFINE** | [DEFINE_DADOS_OPENCODE_PERM_VIA_LOG.md](./DEFINE_DADOS_OPENCODE_PERM_VIA_LOG.md) |
-| **Status** | Ready for Build |
+| **Status** | ✅ Shipped |
 | **Design Confidence** | 0,95 (formato do log e mapeamento run→sessão validados com dados reais) |
 
 ---

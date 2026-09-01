@@ -10,7 +10,7 @@
 | **Feature** | DADOS_OPENCODE_PERM_VIA_LOG |
 | **Date** | 2026-08-31 |
 | **Author** | define-agent |
-| **Status** | ✅ Complete (Designed) |
+| **Status** | ✅ Shipped |
 | **Clarity Score** | 15/15 |
 | **Input** | `BRAINSTORM_DADOS_OPENCODE_PERM_VIA_LOG.md` (dados validados: 40 ocorrências, run→sessão confirmado) |
 

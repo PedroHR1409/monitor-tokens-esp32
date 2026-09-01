@@ -9,7 +9,7 @@
 | **Feature** | DADOS_OPENCODE_PERM_VIA_LOG |
 | **Date** | 2026-08-31 |
 | **Author** | brainstorm-agent |
-| **Status** | ✅ Complete (Defined) |
+| **Status** | ✅ Shipped |
 | **Origem** | "Não está identificando ask e perm (mantém work) — erro agora na conversa docs/27816-execucao-producao, que nem aparece na tela" |
 
 ---
