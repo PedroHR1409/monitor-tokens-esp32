@@ -1,6 +1,12 @@
 #include "session_transport.h"
 #include "config.h"
+// Compila sem configurar: sem secrets.h, usa os placeholders do exemplo
+// (Wi-Fi invalido, mas o build funciona — ideal para CI e para quem clona).
+#if __has_include("secrets.h")
 #include "secrets.h"
+#else
+#include "secrets.example.h"
+#endif
 #include "session_manager.h"
 #include <WiFi.h>
 #include <ESPmDNS.h>
