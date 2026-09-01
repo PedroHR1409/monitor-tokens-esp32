@@ -2,7 +2,7 @@
 
 > Um painel de mesa com ESP32-S3 e tela touch que mostra, em tempo real, **o que seus agentes de IA (Claude Code, Codex e OpenCode) estão fazendo** — e quanto eles custam em tokens.
 
-![CI](https://github.com/SEU_USUARIO/monitor-tokens-esp32/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/PedroHR1409/monitor-tokens-esp32/actions/workflows/ci.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/Licen%C3%A7a-MIT-blue.svg)
 ![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32--S3-orange)
 ![Python](https://img.shields.io/badge/Python-3.10%2B%20std--only-blue)
