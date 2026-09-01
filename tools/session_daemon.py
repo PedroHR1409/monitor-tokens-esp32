@@ -6,7 +6,7 @@ Le as sessoes do Claude Code e do Codex CLI nesta maquina e empurra o resumo par
 ESP32 via HTTP (POST /sessions). Ver docs/SPEC.md secao 5.
 
 Uso:
-    python tools/session_daemon.py --host 192.168.2.165
+    python tools/session_daemon.py --host 192.168.0.50
     python tools/session_daemon.py --interval 3
     python tools/session_daemon.py --once            # um ciclo, para debug
 
