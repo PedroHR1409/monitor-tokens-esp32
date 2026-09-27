@@ -16,6 +16,8 @@
 #include "ui_dashboard.h"
 #include "display_driver.h"
 #include "id_list.h"
+#include "snooze.h"
+#include "device_time.h"
 #include "session_freshness.h"
 #include <time.h>
 
@@ -25,6 +27,9 @@ static uint32_t s_lastValidPayloadMillis = 0;
 static uint32_t s_lastSuccessfulCommunicationMillis = 0;
 static uint64_t s_lastSuccessfulCommunicationEpoch = 0;
 static uint64_t s_lastPayloadGeneratedEpoch = 0;
+// Duracao do mudo declarada pelo operador no monitor.toml. Chega no payload para o
+// toque no header nao precisar de um valor compilado que discorde da config.
+static uint32_t s_snoozeMinutes = SNOOZE_MINUTES_DEFAULT;
 UsageStats usageStats = {};
 UsageHistory usageHistory = {};
 UsageTop usageTop = {};
@@ -54,6 +59,24 @@ String session_transport_ip_string() {
 }
 
 namespace {
+
+// Duas redes, com a ORDEM como prioridade: a primeira que responder vence. Nao ha
+// escolha por RSSI de proposito (o operador pediu previsibilidade), e um scan no
+// loop() custaria um pico em maxTransportMs, medido no /diag — o render e FULL.
+struct WifiCredential {
+    const char *ssid;
+    const char *password;
+};
+
+const WifiCredential WIFI_CREDENTIALS[] = {
+    {WIFI_SSID,   WIFI_PASSWORD},
+    {WIFI_SSID_2, WIFI_PASSWORD_2},
+};
+constexpr uint8_t WIFI_CREDENTIAL_COUNT =
+    sizeof(WIFI_CREDENTIALS) / sizeof(WIFI_CREDENTIALS[0]);
+
+uint8_t s_wifiCredIndex = 0;    // credencial da tentativa atual
+uint8_t s_failedRetries = 0;    // falhas consecutivas na credencial atual
 
 bool constant_time_token_match(const String &provided) {
     const size_t expectedLen = strlen(MONITOR_API_TOKEN);
@@ -87,8 +110,56 @@ ToolType parse_tool(const char *s) {
     if (!strcmp(s, "codex"))  return ToolType::CODEX;
     if (!strcmp(s, "claude")) return ToolType::CLAUDE;
     if (!strcmp(s, "opencode")) return ToolType::OPENCODE;
+    if (!strcmp(s, "commandcode")) return ToolType::COMMANDCODE;
     return ToolType::UNKNOWN;
 }
+
+// Vocabulario fechado com falha segura: severidade desconhecida (daemon mais novo que
+// o firmware) vira NONE em vez de rejeitar o payload. O campo e aditivo — quebrar o
+// POST inteiro por causa dele repetiria o incidente do 422 do "opencode".
+SeverityLevel parse_severity(const char *s) {
+    if (!strcmp(s, "critical")) return SeverityLevel::CRITICAL;
+    if (!strcmp(s, "expired"))  return SeverityLevel::EXPIRED;
+    if (!strcmp(s, "warning"))  return SeverityLevel::WARNING;
+    return SeverityLevel::NONE;
+}
+
+const char *severity_name(SeverityLevel severity) {
+    switch (severity) {
+        case SeverityLevel::CRITICAL: return "critical";
+        case SeverityLevel::EXPIRED:  return "expired";
+        case SeverityLevel::WARNING:  return "warning";
+        default:                      return "none";
+    }
+}
+
+}  // namespace
+
+SeverityLevel session_worst_severity() {
+    // O backlight e um recurso unico e global, entao a pior severidade entre os cards
+    // manda — mesma regra do STATE_PRIORITY do daemon, para nao existirem duas escalas
+    // de prioridade discordando. Card stale fica fora: o dado dele nao vale mais.
+    SeverityLevel worst = SeverityLevel::NONE;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        const SessionData &s = sessions[i];
+        if (!s.occupied || s.stale) continue;
+        if (s.severity > worst) worst = s.severity;
+    }
+    return worst;
+}
+
+uint32_t session_snooze_minutes() {
+    return s_snoozeMinutes;
+}
+
+SeverityLevel session_alert_severity() {
+    // Mudo e mudo: a janela cobre inclusive escalada que nasceu depois do toque. E um
+    // contrato previsivel (15 min de silencio, sem excecao) em troca de nao precisar
+    // guardar quais sessoes estavam alertando quando o operador silenciou.
+    return snooze_active() ? SeverityLevel::NONE : session_worst_severity();
+}
+
+namespace {
 
 void handle_health() {
     server.send(200, "application/json", "{\"status\":\"ok\"}");
@@ -101,6 +172,8 @@ void handle_health() {
 // chegou ao objeto certo. Se `touches` sobe e `card_clicks` nao, o problema e mapeamento
 // de coordenada ou hit-testing, nao o driver.
 void handle_diag() {
+    if (!require_auth()) return;
+
     const TouchDiag &t = touch_diag();
     JsonDocument doc;
     JsonObject to = doc["touch"].to<JsonObject>();
@@ -125,6 +198,16 @@ void handle_diag() {
     JsonArray cl = to["card_longs"].to<JsonArray>();
     for (uint8_t i = 0; i < MAX_SESSIONS; i++) { cc.add(t.cardClicks[i]); cl.add(t.cardLongs[i]); }
     to["card_ignored_empty"] = t.cardIgnoredEmpty;
+
+    // Diagnostico do alerta escalonado: prova de fora que a severidade chegou, que o
+    // mudo esta armado e em que nivel o PWM ficou — sem precisar de alguem olhando a
+    // tela no instante do pulso, que e a mesma razao de existir do resto deste /diag.
+    JsonObject al = doc["alert"].to<JsonObject>();
+    al["severity"]    = severity_name(session_alert_severity());
+    al["raw_severity"] = severity_name(session_worst_severity());
+    al["snooze_s"]    = snooze_remaining_s();
+    al["pulse_level"] = device_backlight_level();
+    al["pulse_base"]  = device_backlight_base();
 
     // Diagnostico do widget unificado: prova (ou refuta) que o historico chegou e
     // qual visao esta ativa — sem depender de impressao visual na tela.
@@ -196,6 +279,26 @@ void send_list(const IdList &list, const char *key) {
 }
 
 void handle_hidden() { if (require_auth()) send_list(hiddenList, "hidden"); }
+
+// GET /snooze — segundos restantes de mudo, armado por toque no header. O daemon le
+// isto antes de disparar toast: mudo na placa silencia os dois canais.
+// Duracao relativa, nunca timestamp: os dois relogios sao independentes e segundos
+// restantes nao tem fuso nem skew (mesmo racional de `elapsed`, SPEC secao 5).
+void handle_snooze() {
+    if (!require_auth()) return;
+    char body[40];
+    snprintf(body, sizeof(body), "{\"snooze_s\":%lu}",
+             (unsigned long)snooze_remaining_s());
+    server.send(200, "application/json", body);
+}
+
+// POST /snooze/clear — desfaz o mudo sem precisar tocar no painel, simetrico a
+// /hidden/clear.
+void handle_snooze_clear() {
+    if (!require_auth()) return;
+    snooze_clear();
+    server.send(200, "application/json", "{\"status\":\"ok\"}");
+}
 
 // GET /pinned — sessoes fixadas pelo seletor do painel. O daemon envia essas mesmo que
 // estejam fora da janela de 4h, para o card escolhido realmente aparecer.
@@ -327,6 +430,11 @@ void handle_sessions_post() {
         return;
     }
 
+    // Campo aditivo: ausente (daemon legado) mantem o fallback compilado. Clamp para
+    // nao aceitar um mudo absurdo vindo de payload corrompido.
+    const uint32_t declaredSnooze = doc["snooze_minutes"] | 0UL;
+    if (declaredSnooze > 0 && declaredSnooze <= 240UL) s_snoozeMinutes = declaredSnooze;
+
     const uint32_t now = millis();
     int count = 0;
     for (JsonObject obj : arr) {
@@ -382,6 +490,7 @@ void handle_sessions_post() {
 
         s.tool  = parse_tool(obj["tool"] | "");
         s.state = newState;
+        s.severity = parse_severity(obj["severity"] | "");
         s.lastUpdateMillis = now;
         s.sourceAgeSeconds = obj["source_age_s"] | elapsed;
         s.occupied = true;
@@ -475,11 +584,12 @@ void handle_sessions_post() {
         JsonObject top = st["usage"]["top"].as<JsonObject>();
         if (!top.isNull()) {
             static const char *PERIODS[USAGE_PERIODS] = {"d1", "d7", "d30"};
-            static const char *PROVIDERS[3] = {"claude", "codex", "opencode"};
+            static const char *PROVIDERS[USAGE_PROVIDERS] =
+                {"claude", "codex", "opencode", "commandcode"};
             for (int p = 0; p < USAGE_PERIODS; p++) {
                 JsonObject per = top[PERIODS[p]].as<JsonObject>();
                 if (per.isNull()) continue;
-                for (int pr = 0; pr < 3; pr++) {
+                for (int pr = 0; pr < USAGE_PROVIDERS; pr++) {
                     JsonObject pv = per[PROVIDERS[pr]].as<JsonObject>();
                     if (pv.isNull()) continue;
                     ProviderTop &dst = usageTop.providers[p][pr];
@@ -516,20 +626,34 @@ void session_transport_init() {
     Serial.println("[transport] conectando ao WiFi...");
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-    uint32_t start = millis();
+    // Um relogio so para as duas redes: ui_dashboard_init() roda DEPOIS daqui, entao
+    // 15s por credencial virariam 30s de tela preta. O orcamento e dividido pelo numero
+    // de credenciais, entao o total nunca passa de WIFI_CONNECT_TIMEOUT_MS.
+    const uint32_t start = millis();
+    const uint32_t perCredential = WIFI_CONNECT_TIMEOUT_MS / WIFI_CREDENTIAL_COUNT;
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
-        delay(250);
-        Serial.print(".");
+        const WifiCredential &cred = WIFI_CREDENTIALS[s_wifiCredIndex];
+        WiFi.begin(cred.ssid, cred.password);
+        const uint32_t attemptStart = millis();
+        while (WiFi.status() != WL_CONNECTED
+               && millis() - start < WIFI_CONNECT_TIMEOUT_MS
+               && millis() - attemptStart < perCredential) {
+            delay(250);
+            Serial.print(".");
+        }
+        if (WiFi.status() == WL_CONNECTED) break;
+        s_wifiCredIndex = (s_wifiCredIndex + 1) % WIFI_CREDENTIAL_COUNT;
     }
     Serial.println();
 
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[transport] nao conectou agora (confira include/secrets.h) — "
-                       "vai continuar tentando em background");
+        Serial.println("[transport] nenhuma das redes respondeu (confira "
+                       "include/secrets.h) — vai continuar tentando em background");
     } else {
-        Serial.printf("[transport] WiFi OK, IP=%s\n", WiFi.localIP().toString().c_str());
+        Serial.printf("[transport] WiFi OK, IP=%s, rede=\"%s\"\n",
+                      WiFi.localIP().toString().c_str(),
+                      WIFI_CREDENTIALS[s_wifiCredIndex].ssid);
         if (MDNS.begin(MDNS_HOSTNAME)) {
             MDNS.addService("http", "tcp", HTTP_SERVER_PORT);
             Serial.printf("[transport] mDNS: http://%s.local\n", MDNS_HOSTNAME);
@@ -543,6 +667,8 @@ void session_transport_init() {
     server.on("/hidden/clear", HTTP_POST, handle_hidden_clear);
     server.on("/pinned", HTTP_GET, handle_pinned);
     server.on("/pinned/clear", HTTP_POST, handle_pinned_clear);
+    server.on("/snooze", HTTP_GET, handle_snooze);
+    server.on("/snooze/clear", HTTP_POST, handle_snooze_clear);
     const char *authHeaders[] = {"X-Monitor-Token"};
     server.collectHeaders(authHeaders, 1);
     server.begin();
@@ -564,12 +690,22 @@ void session_transport_loop() {
         }
         if (now - lastRetry >= WIFI_RETRY_INTERVAL_MS) {
             lastRetry = now;
+            // Alterna SO depois de uma falha na credencial atual: uma queda breve na
+            // rede em que ja estavamos nao deve jogar o painel para a outra.
+            if (s_failedRetries > 0) {
+                s_wifiCredIndex = (s_wifiCredIndex + 1) % WIFI_CREDENTIAL_COUNT;
+            }
+            s_failedRetries++;
             WiFi.disconnect();
-            WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+            WiFi.begin(WIFI_CREDENTIALS[s_wifiCredIndex].ssid,
+                       WIFI_CREDENTIALS[s_wifiCredIndex].password);
         }
     } else if (!wasConnected) {
         wasConnected = true;
-        Serial.printf("[transport] WiFi reconectado, IP=%s\n", WiFi.localIP().toString().c_str());
+        s_failedRetries = 0;
+        Serial.printf("[transport] WiFi reconectado, IP=%s, rede=\"%s\"\n",
+                      WiFi.localIP().toString().c_str(),
+                      WIFI_CREDENTIALS[s_wifiCredIndex].ssid);
         MDNS.begin(MDNS_HOSTNAME);   // o servico se perde no reconnect
         MDNS.addService("http", "tcp", HTTP_SERVER_PORT);
     }

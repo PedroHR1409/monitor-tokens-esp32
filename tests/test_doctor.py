@@ -69,5 +69,74 @@ class DoctorFixtureTests(unittest.TestCase):
         self.assertEqual({"code", "status", "message", "detail"}, set(result.to_dict()))
 
 
+class DoctorNotifyCheckTests(unittest.TestCase):
+    """The notify channel is secondary; hiding its absence would leave the
+    operator relying on a toast that silently never fires."""
+
+    def test_available_fixture_reports_ok(self):
+        fixture = {"notify": {"available": True, "detail": "/usr/bin/notify-send"}}
+        result = doctor.check_notify(fixture)
+        self.assertEqual("ok", result.status)
+
+    def test_unavailable_fixture_reports_warn_never_fail(self):
+        """WARN, never FAIL: the panel is the primary channel and the daemon
+        works fine without the secondary toast."""
+        fixture = {"notify": {"available": False, "detail": "ausente"}}
+        result = doctor.check_notify(fixture)
+        self.assertEqual("warn", result.status)
+        self.assertNotEqual("fail", result.status)
+
+    def test_notify_check_is_part_of_run_checks(self):
+        config = MonitorConfig.load(ROOT / "missing-monitor.toml", environ={
+            "MONITOR_API_TOKEN": "configured-token-must-never-appear",
+        })
+        results = doctor.run_checks(config, FIXTURES / "healthy.json")
+        self.assertIn("notify", {result.code for result in results})
+
+
+class DoctorProtocolTests(unittest.TestCase):
+    """Protocol v2 is a reserved contract; the doctor must not imply it verified
+    a capability the firmware does not serve."""
+
+    def test_live_check_reports_the_reserved_contract_not_a_missing_probe(self):
+        result = doctor.check_protocol({})
+
+        self.assertEqual("warn", result.status)
+        self.assertIn("reserved", result.message)
+        self.assertNotIn("cannot be verified", result.message)
+
+    def test_fixture_can_still_report_v2_compatibility(self):
+        result = doctor.check_protocol({"device": {"protocols": [1, 2]}})
+
+        self.assertEqual("ok", result.status)
+
+    def test_fixture_can_still_report_legacy_v1_only(self):
+        result = doctor.check_protocol({"device": {"protocols": [1]}})
+
+        self.assertEqual("warn", result.status)
+        self.assertIn("legacy", result.message)
+
+
+class DoctorCommandCodeTests(unittest.TestCase):
+    """The Command Code provider must appear in the same diagnostics as the rest."""
+
+    def test_healthy_fixture_reports_the_commandcode_path_and_hook(self):
+        results = doctor.run_checks(self._config(), FIXTURES / "healthy.json")
+        codes = {result.code: result.status for result in results}
+        self.assertEqual("ok", codes["paths.commandcode"])
+        self.assertEqual("ok", codes["hooks.commandcode"])
+
+    def test_missing_commandcode_degrades_to_warn(self):
+        results = doctor.check_paths({"paths": {"commandcode": False}})
+        codes = {result.code: result.status for result in results}
+        self.assertEqual("warn", codes["paths.commandcode"])
+        results = doctor.check_hooks({"hooks": {"commandcode": False}})
+        codes = {result.code: result.status for result in results}
+        self.assertEqual("warn", codes["hooks.commandcode"])
+
+    def _config(self) -> MonitorConfig:
+        return MonitorConfig.load(ROOT / "missing-monitor.toml", environ={})
+
+
 if __name__ == "__main__":
     unittest.main()

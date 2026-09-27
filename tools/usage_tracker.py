@@ -186,8 +186,23 @@ def claude_series(projects_dir: Path, tz: timezone,
                        legacy["tokens_today"], "measured")
 
 
+def _billable_total_usage(usage: dict) -> int:
+    """Total acumulado sem recontar a releitura de contexto em cache."""
+    detailed = any(key in usage for key in (
+        "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+        "output_tokens", "reasoning_output_tokens"))
+    if not detailed:
+        return max(int(usage.get("total_tokens") or 0), 0)
+    input_tokens = max(int(usage.get("input_tokens") or 0), 0)
+    cached_input = max(int(usage.get("cached_input_tokens") or 0), 0)
+    cache_write = max(int(usage.get("cache_write_input_tokens") or 0), 0)
+    output = max(int(usage.get("output_tokens") or 0), 0)
+    reasoning = max(int(usage.get("reasoning_output_tokens") or 0), 0)
+    return max(input_tokens - cached_input, 0) + cache_write + output + reasoning
+
+
 def _rollout_total_events(path: Path):
-    """Pares (timestamp, total acumulado) que o rollout do Codex publica."""
+    """Pares (timestamp, total acumulado) de consumo sem cache.read."""
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -204,7 +219,7 @@ def _rollout_total_events(path: Path):
                 if timestamp is None:
                     continue
                 try:
-                    yield timestamp, max(int(usage["total_tokens"]), 0)
+                    yield timestamp, _billable_total_usage(usage)
                 except (TypeError, ValueError):
                     continue
     except OSError:

@@ -11,21 +11,22 @@ Por que existe um modulo so para isso:
   distingue "sem git" de "detached HEAD".
 
 * **Codex** — o `session_index.jsonl` so tem id/thread_name/updated_at, entao modelo e
-  branch vinham vazios. Os arquivos `~/.codex/sessions/AAAA/MM/DD/rollout-*.jsonl`
-  carregam `payload.model` e `payload.cwd`, e o UUID no nome do arquivo e o mesmo id do
+  branch vinham vazios. Os arquivos `$CODEX_HOME/sessions/AAAA/MM/DD/rollout-*.jsonl`
+    carregam `payload.model` e `payload.cwd`, e o UUID no nome do arquivo e o mesmo id do
   indice — o que permite casar um com o outro sem abrir todos os arquivos.
 """
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
 
+from codex_paths import CODEX_SESSIONS, CODEX_STATE_DB
 from session_state import parse_ts
 from usage_model import context_measurement
 
-CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 ROLLOUT_HEAD_BYTES = 96 * 1024   # model/cwd ficam no comeco do arquivo
 
 # Intervalo minimo entre duas varreduras do diretorio de rollouts.
@@ -41,15 +42,57 @@ ROLLOUT_HEAD_BYTES = 96 * 1024   # model/cwd ficam no comeco do arquivo
 REINDEX_MIN_INTERVAL_S = 10.0
 
 
-def read_git_branch(cwd: str | None) -> str:
-    """Branch atual lida de <cwd>/.git/HEAD.
+def codex_threads(database: Path | None = None) -> dict[str, dict]:
+    """Lê as threads atuais do SQLite do Codex sem abrir os rollouts.
 
-    "" = nao e repositorio git. "detached" = HEAD solto (sem branch nomeada).
+    Versões recentes do Codex mantêm a recência em ``threads.updated_at_ms``;
+    ``session_index.jsonl`` deixou de receber novas linhas em algumas instalações.
+    A consulta é somente leitura e falha fechado quando o schema/arquivo não existe.
     """
-    if not cwd:
-        return ""                      # nem sabemos o diretorio
-    base = Path(cwd)
-    git_entry = base / ".git"
+    path = database if database is not None else CODEX_STATE_DB
+    if not path.is_file():
+        return {}
+    try:
+        uri = "file:{}?mode=ro".format(path.as_posix())
+        connection = sqlite3.connect(uri, uri=True, timeout=0.2)
+        try:
+            rows = connection.execute(
+                "SELECT id, title, name, updated_at, updated_at_ms, cwd, model, "
+                "reasoning_effort, archived FROM threads"
+            )
+            result = {}
+            for row in rows:
+                (session_id, title, name, updated_at, updated_at_ms, cwd, model,
+                 effort, archived) = row
+                if not session_id or archived:
+                    continue
+                stamp = updated_at_ms or (int(updated_at) * 1000 if updated_at else 0)
+                result[str(session_id)] = {
+                    "id": str(session_id),
+                    "thread_name": str(title or name or "codex"),
+                    "updated_at": (datetime_from_epoch(stamp / 1000.0)
+                                   if stamp else ""),
+                    "cwd": str(cwd or ""),
+                    "model": str(model or ""),
+                    "effort": str(effort or ""),
+                    "updated_epoch": stamp / 1000.0 if stamp else 0.0,
+                }
+            return result
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return {}
+
+
+def datetime_from_epoch(value: float) -> str:
+    """ISO UTC sem depender do parser do Codex para o valor do SQLite."""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(value, timezone.utc).isoformat()
+
+
+def _git_head(directory: Path) -> str | None:
+    """Conteudo cru de .git/HEAD do diretorio (ou gitdir do worktree); None se nao houver."""
+    git_entry = directory / ".git"
     head = git_entry / "HEAD"
     if git_entry.is_file():
         # Worktree: .git e um ARQUIVO ("gitdir: <repo>/.git/worktrees/<nome>") que
@@ -57,23 +100,73 @@ def read_git_branch(cwd: str | None) -> str:
         try:
             raw_entry = git_entry.read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
-            return "sem git" if base.is_dir() else ""
+            return None
         if not raw_entry.startswith("gitdir:"):
-            return "sem git" if base.is_dir() else ""
+            return None
         gitdir = Path(raw_entry.split(":", 1)[1].strip())
         if not gitdir.is_absolute():
-            gitdir = base / gitdir
+            gitdir = directory / gitdir
         head = gitdir / "HEAD"
     try:
-        raw = head.read_text(encoding="utf-8", errors="replace").strip()
+        return head.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
-        # Distingue "o projeto nao usa git" de "nao sabemos": mostrar campo vazio nos
-        # dois casos esconde a diferenca, e "HEAD" (o que o transcript devolvia) parecia
-        # nome de branch.
-        return "sem git" if base.is_dir() else ""
-    if raw.startswith("ref:"):
-        return raw.split("/")[-1]
-    return "detached" if raw else ""
+        return None
+
+
+def read_git_branch(cwd: str | None) -> str:
+    """Branch atual lida de <cwd>/.git/HEAD.
+
+    "" = nao e repositorio git. "detached" = HEAD solto (sem branch nomeada).
+    Procura .git no cwd E nos pais, como o proprio git faz: sessao aberta num
+    subdiretorio do repo tinha o .git no nivel de cima e aparecia "sem git" no
+    card, deixando o operador sem saber qual sessao era.
+    """
+    if not cwd:
+        return ""                      # nem sabemos o diretorio
+    original = Path(cwd)
+    base = original
+    while True:
+        raw = _git_head(base)
+        if raw is not None:
+            if raw.startswith("ref:"):
+                return raw.split("/")[-1]
+            return "detached" if raw else ""
+        parent = base.parent
+        if parent == base:
+            break
+        base = parent
+    # Distingue "o projeto nao usa git" de "nao sabemos": mostrar campo vazio nos
+    # dois casos esconde a diferenca, e "HEAD" (o que o transcript devolvia) parecia
+    # nome de branch.
+    return "sem git" if original.is_dir() else ""
+
+
+def recent_rollouts(directory: Path, window_s: float, now_epoch: float) -> dict:
+    """{session_id: mtime} dos rollouts escritos na janela, so olhando mtimes.
+
+    O session_index parou de receber as sessoes novas (medido 15/09/2026: o
+    rollout de 10h40 do dia nao tinha linha no indice, cuja ultima entrada era
+    de 11/09) — sem esta varredura, sessao nova do Codex simplesmente nao
+    existe para o painel. Devolve apenas ids recentes: rollouts velhos continuam
+    pertencendo ao indice."""
+    out: dict[str, float] = {}
+    if not directory.is_dir():
+        return out
+    cutoff = now_epoch - window_s
+    try:
+        for p in directory.rglob("rollout-*.jsonl"):
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if mtime < cutoff:
+                continue
+            parts = p.stem.split("-")
+            if len(parts) >= 6:
+                out["-".join(parts[-5:])] = mtime
+    except OSError:
+        pass
+    return out
 
 
 def _rollout_index() -> dict:
@@ -198,7 +291,10 @@ def codex_meta(session_id: str, since=None) -> dict:
                 if isinstance(info, dict):
                     tu = info.get("total_token_usage")
                     if isinstance(tu, dict) and tu.get("total_tokens") is not None:
-                        total_now = int(tu["total_tokens"])
+                        # total_tokens inclui cached_input_tokens; para consumo usamos
+                        # a mesma regra do historico (sem cache.read).
+                        from usage_tracker import _billable_total_usage
+                        total_now = _billable_total_usage(tu)
                         ts = parse_ts(obj.get("timestamp"))
                         if since and ts:
                             if ts < since:
@@ -224,7 +320,10 @@ def codex_meta(session_id: str, since=None) -> dict:
 
     out = {"model": model, "cwd": cwd, "effort": effort,
            "tokens": max(tokens, 0), "ctx_pct": context["pct"], "context": context}
-    if len(_meta_cache) > 64:
+    if len(_meta_cache) > 256:
+        # ~80 ids x 3 periodos do pódio estouravam o teto de 64 a cada build: o
+        # cache era ZERADO no meio do loop e cada ciclo relia rollouts de dezenas
+        # de MB. 256 segura o diretorio atual inteiro com folga.
         _meta_cache.clear()
     _meta_cache[key] = out
     return out

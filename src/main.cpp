@@ -1,15 +1,18 @@
 #include <Arduino.h>
 #include <lvgl.h>
+#include "config.h"
 #include "display_driver.h"
 #include "device_time.h"
 #include "id_list.h"
 #include "session_manager.h"
+#include "snooze.h"
 #include "session_transport.h"
 #include "touch_driver.h"
 #include "ui_dashboard.h"
 
 static uint32_t lastUiTick = 0;
 static uint32_t lastSlowTick = 0;
+static uint32_t lastPulseTick = 0;
 static uint32_t lastHeartbeat = 0;
 
 void setup() {
@@ -24,6 +27,7 @@ void setup() {
     touch_init();               // segue sem toque se o controlador nao responder
     session_manager_init();
     id_lists_begin();
+    snooze_begin();
     session_transport_init();
     device_time_init();         // NTP: precisa do WiFi ja iniciado
     ui_dashboard_init();
@@ -45,6 +49,14 @@ void loop() {
     if (trDt > uiDiag.maxTransportMs) uiDiag.maxTransportMs = trDt;
 
     const uint32_t now = millis();
+
+    // Pulso do alerta, muito mais rapido que a UI: a 1Hz o pulso seria um piscar
+    // grosseiro. Cabe nesta cadencia porque nao toca em LVGL — so ledcWrite, e apenas
+    // quando o duty muda de verdade. Ver docs/SPEC.md secao 19.
+    if (now - lastPulseTick >= PULSE_TICK_MS) {
+        lastPulseTick = now;
+        device_backlight_pulse_tick(session_alert_severity(), now);
+    }
 
     // UI a 1Hz. Nenhum valor de tempo e contado aqui: os cards derivam tudo do relogio
     // (millis() - ancora), entao um refresh atrasado nao vira relogio atrasado.

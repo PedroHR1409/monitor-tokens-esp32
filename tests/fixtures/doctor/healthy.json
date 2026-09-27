@@ -11,12 +11,14 @@
   },
   "hooks": {
     "claude": true,
-    "codex": true
+    "codex": true,
+    "commandcode": true
   },
   "paths": {
     "claude": true,
     "codex": true,
-    "opencode": true
+    "opencode": true,
+    "commandcode": true
   },
   "platformio": {
     "available": true

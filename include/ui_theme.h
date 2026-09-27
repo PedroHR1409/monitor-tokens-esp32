@@ -83,8 +83,19 @@ constexpr int16_t HM_HOUR_Y  = 72;   // rotulo de hora (abaixo)
 constexpr uint32_t HM_MIN_OPA = 70;
 
 // --- Alerta visual quando algo depende de voce (perm/ask) ---
-constexpr uint32_t ALERT_PERIOD_MS = 600;
+// A borda NAO pulsa mais. Ela alternava a cor a cada ALERT_PERIOD_MS, e num render
+// FULL cada troca invalidava a tela: o alerta antigo custava ~3 frames por segundo,
+// exatamente o padrao que a fase 4 eliminou nos textos com os guards set_text_if.
+// Agora a borda e estatica e diz O QUE espera (cor do estado); o movimento migrou
+// para o pulso de backlight, que diz QUAO URGENTE e e nao custa frame nenhum.
+// ALERT_PERIOD_MS foi removido junto com o pulso da borda. Ver docs/SPEC.md secao 19.
 constexpr int16_t  ALERT_BORDER_W  = 4;
+
+// Rotulo de mudo no relogio do header, enquanto o snooze estiver ativo. O header e a
+// unica superficie grande e inerte do painel (320x34): toque curto e toque longo nos
+// cards ja tem dono (detalhe e esconder), e a tela de detalhe tem decisao registrada
+// contra botao dedicado.
+constexpr uint32_t COLOR_SNOOZE_DIM = 0x9CA3AF;
 
 // --- Contexto quase cheio ---
 // A 80% da janela o card pisca em vermelho ate a sessao ser aliviada. Periodo maior que

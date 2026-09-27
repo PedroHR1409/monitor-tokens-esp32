@@ -7,6 +7,7 @@
 #include "icons.h"
 #include "touch_driver.h"
 #include "id_list.h"
+#include "snooze.h"
 #include <lvgl.h>
 #include <stdio.h>
 #include <string.h>
@@ -134,7 +135,9 @@ char g_cardRenderedId[theme::SESSION_CARDS][SESSION_ID_LEN] = {{0}};
 lv_obj_t *g_headerDot = nullptr;
 lv_obj_t *g_clockLabel = nullptr;
 uint32_t  g_cHeaderDot = 0;
-char      g_cClock[8] = "";
+// 24 e nao 8: o rotulo cresce para "14:32 <mute> 12m" enquanto o mudo dura.
+char      g_cClock[24] = "";
+uint32_t  g_cClockColor = 0;
 
 // card de tokens
 // Widget unificado de consumo: substitui os cards de tokens/cota e a faixa 12h.
@@ -156,17 +159,17 @@ lv_obj_t *g_uwInspect = nullptr, *g_uwInspectL1 = nullptr, *g_uwInspectL2 = null
 char g_cUwInspect1[40] = "", g_cUwInspect2[40] = "";
 int16_t g_cUwY0 = -1;              // ultimo offset vertical aplicado (evita realinhar)
 
-// Podio: 3 barras rankeadas pelo total do periodo; chip cicla hoje/7d/30d; tocar
+// Podio: 4 barras rankeadas pelo total do periodo; chip cicla hoje/7d/30d; tocar
 // numa barra abre o modal com as sessoes do provider (top 6 do payload).
 lv_obj_t *g_uwChip = nullptr;
-lv_obj_t *g_uwBar[3] = {nullptr};
-lv_obj_t *g_uwBarName[3] = {nullptr};
-lv_obj_t *g_uwBarValue[3] = {nullptr};
+lv_obj_t *g_uwBar[USAGE_PROVIDERS] = {nullptr};
+lv_obj_t *g_uwBarName[USAGE_PROVIDERS] = {nullptr};
+lv_obj_t *g_uwBarValue[USAGE_PROVIDERS] = {nullptr};
 char g_cUwChip[6] = "";
-char g_cUwBarName[3][12] = {{0}};
-char g_cUwBarValue[3][8] = {{0}};
+char g_cUwBarName[USAGE_PROVIDERS][12] = {{0}};
+char g_cUwBarValue[USAGE_PROVIDERS][8] = {{0}};
 uint8_t g_uwPeriod = 0;            // 0 = hoje, 1 = 7d, 2 = 30d
-int8_t g_uwOrder[3] = {0, 1, 2};   // provider idx em ordem de rank
+int8_t g_uwOrder[USAGE_PROVIDERS] = {0, 1, 2, 3};   // provider idx em ordem de rank
 
 // Modal de drill-down (reaproveita o padrao do seletor de sessoes).
 lv_obj_t *g_uwModal = nullptr, *g_uwModalTitle = nullptr;
@@ -261,6 +264,15 @@ lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, uint32_t color) {
     return l;
 }
 
+// Toque no header arma (ou desarma) o mudo. O header e a unica superficie grande e
+// inerte do painel: toque curto e longo nos cards ja tem dono (detalhe e esconder), e a
+// tela de detalhe tem decisao registrada contra botao dedicado. Tocar de novo durante o
+// mudo desarma — sem isso o operador ficaria preso ao silencio que acabou de pedir.
+void header_snooze_cb(lv_event_t *) {
+    if (snooze_active()) snooze_clear();
+    else                 snooze_arm(session_snooze_minutes());
+}
+
 void build_header(lv_obj_t *parent) {
     lv_obj_t *h = lv_obj_create(parent);
     lv_obj_remove_style_all(h);
@@ -290,6 +302,10 @@ void build_header(lv_obj_t *parent) {
     lv_obj_set_style_bg_opa(g_headerDot, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(g_headerDot, theme::color(theme::COLOR_FREE), 0);
     lv_obj_align(g_headerDot, LV_ALIGN_RIGHT_MID, -theme::MARGIN, 0);
+
+    // Alvo de 320x34: nao exige mira, ao contrario de um botao dedicado.
+    lv_obj_add_flag(h, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(h, header_snooze_cb, LV_EVENT_SHORT_CLICKED, nullptr);
 
     lv_obj_t *div = lv_obj_create(parent);
     lv_obj_remove_style_all(div);
@@ -380,7 +396,9 @@ void card_event_cb(lv_event_t *e) {
 // em qualquer escala: 50k ou 5M de pico produzem o mesmo degrau de cor).
 uint32_t heatmap_color(uint32_t tokens, uint32_t peak) {
     if (tokens == 0 || peak == 0) return theme::HM_EMPTY;
-    const uint32_t pct = tokens * 100UL / peak;
+    // tokens pode passar de 42M; tokens * 100 estoura uint32_t antes da divisao.
+    const uint32_t pct = static_cast<uint32_t>(
+        (static_cast<uint64_t>(tokens) * 100ULL) / peak);
     if (pct > 75) return theme::HM_L4;
     if (pct > 50) return theme::HM_L3;
     if (pct > 25) return theme::HM_L2;
@@ -504,11 +522,11 @@ void build_usage_widget(lv_obj_t *parent) {
     lv_obj_add_flag(g_uwChip, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(g_uwChip, usage_widget_chip_cb, LV_EVENT_SHORT_CLICKED, nullptr);
 
-    // Podio em COLUNAS: 2o (esq) | 1o (centro) | 3o (dir). Barra vertical com
-    // altura por rank; icone + valor acima; nome abaixo. Criados como filhos do
-    // podio (NAO da barra): a barra muda de altura, o header/nome ficam fixos.
-    constexpr int16_t PB_W = 72, PB_H = 88;
-    for (int i = 0; i < 3; i++) {
+    // Podio em 4 COLUNAS lado a lado, rank 0 (maior) a esquerda; barra vertical com
+    // altura decrescente por rank; valor acima; nome abaixo. Criados como filhos do
+    // podio (NAO da barra): a barra muda de altura, o valor/nome ficam fixos.
+    constexpr int16_t PB_W = 66, PB_H = 88;
+    for (int i = 0; i < USAGE_PROVIDERS; i++) {
         lv_obj_t *bar = lv_obj_create(g_uwPodio);
         lv_obj_remove_style_all(bar);
         lv_obj_set_size(bar, PB_W, PB_H);
@@ -524,7 +542,7 @@ void build_usage_widget(lv_obj_t *parent) {
 
 
         g_uwBarValue[i] = make_label(g_uwPodio, &lv_font_montserrat_14, theme::COLOR_TEXT);
-        lv_obj_set_width(g_uwBarValue[i], 72);
+        lv_obj_set_width(g_uwBarValue[i], PB_W);
         lv_obj_set_style_text_align(g_uwBarValue[i], LV_TEXT_ALIGN_CENTER, 0);
 
         g_uwBarName[i] = make_label(g_uwPodio, &lv_font_montserrat_12, theme::COLOR_TEXT_DIM);
@@ -532,6 +550,12 @@ void build_usage_widget(lv_obj_t *parent) {
         lv_obj_set_style_text_align(g_uwBarName[i], LV_TEXT_ALIGN_CENTER, 0);
     }
     layout_usage_podio();
+
+    // O podio (rank 0, coluna mais larga) invade a faixa da seta em x — como e
+    // criado DEPOIS dela, ficava por cima e "engolia" o toque. A seta e um
+    // controle permanente (unica via heatmap <-> podio): sempre no topo do
+    // empilhamento do card, nunca coberta por nenhuma visao.
+    lv_obj_move_foreground(g_uwArrow);
 
     // --- Modal de drill-down: padrao do seletor de sessoes (backdrop + linhas) ---
     g_uwModal = lv_obj_create(parent);
@@ -567,12 +591,12 @@ static const char *usage_period_label() {
 }
 
 // Ordem de rank estavel: total desc, empate resolve por indice (nome do provider
-// em PROVIDERS e alfabetico: claude < codex < opencode).
+// em PROVIDERS e alfabetico: claude < codex < commandcode < opencode).
 void layout_usage_podio() {
     const UsageTop &top = usageTop;
-    int8_t order[3] = {0, 1, 2};
+    int8_t order[USAGE_PROVIDERS] = {0, 1, 2, 3};
     if (top.valid) {
-        for (int i = 1; i < 3; i++)
+        for (int i = 1; i < USAGE_PROVIDERS; i++)
             for (int j = i; j > 0; j--) {
                 const uint32_t a = top.providers[g_uwPeriod][order[j - 1]].total;
                 const uint32_t b = top.providers[g_uwPeriod][order[j]].total;
@@ -580,32 +604,35 @@ void layout_usage_podio() {
                 else break;
             }
     }
-    for (int i = 0; i < 3; i++) g_uwOrder[i] = order[i];
+    for (int i = 0; i < USAGE_PROVIDERS; i++) g_uwOrder[i] = order[i];
 }
 
-// Rótulos/valores/ícones por rank; hierarquia por largura e posicao, nao por cor.
+// Rotulos/valores por rank; hierarquia por altura e posicao (esquerda = maior).
+// "Command" e o nome curto do Command Code: "CommandCode" nao cabe sem quebrar.
 void render_usage_podio() {
-    static const char *NAMES[3] = {"Claude", "Codex", "OpenCode"};
+    static const char *NAMES[USAGE_PROVIDERS] =
+        {"Claude", "Codex", "OpenCode", "Command"};
 
     set_text_if(g_uwChip, g_cUwChip, sizeof(g_cUwChip), usage_period_label());
 
-    // Colunas fixas: rank 0 (1o) -> centro, rank 1 (2o) -> esquerda,
-    // rank 2 (3o) -> direita. Altura da barra por rank; cor degrau L4/L3/L2.
-    constexpr int16_t COL_X[3] = {22, 102, 182};         // esq, centro, dir
-    constexpr int16_t BAR_W = 72, BASE_Y = 190;
-    constexpr int16_t BAR_H[3] = {120, 88, 64};          // altura por rank
-    constexpr uint32_t BAR_C[3] = {theme::HM_L4, theme::HM_L3, theme::HM_L2};
+    // 4 colunas lado a lado, rank 0 a esquerda. Altura da barra por rank; cor
+    // degrau L4 (maior) -> L1 (menor). 304px de largura: 4x66 + 3x8 = 288.
+    constexpr int16_t COL_X[USAGE_PROVIDERS] = {8, 82, 156, 230};
+    constexpr int16_t BAR_W = 66, BASE_Y = 190;
+    constexpr int16_t BAR_H[USAGE_PROVIDERS] = {120, 100, 82, 66};   // altura por rank
+    constexpr uint32_t BAR_C[USAGE_PROVIDERS] = {theme::HM_L4, theme::HM_L3,
+                                                 theme::HM_L2, theme::HM_L1};
 
-    for (int rank = 0; rank < 3; rank++) {
+    for (int rank = 0; rank < USAGE_PROVIDERS; rank++) {
         const int8_t provider = g_uwOrder[rank];
-        const int16_t col_x = COL_X[(rank == 0) ? 1 : (rank == 1 ? 0 : 2)];
+        const int16_t col_x = COL_X[rank];
         const int16_t bh = BAR_H[rank];
         const int16_t top = BASE_Y - bh;
 
         lv_obj_t *bar = g_uwBar[rank];
         lv_obj_set_size(bar, BAR_W, bh);
+        lv_obj_set_style_bg_color(bar, theme::color(BAR_C[rank]), 0);
         lv_obj_align(bar, LV_ALIGN_TOP_LEFT, col_x, top);
-
 
         char val[10];
         if (usageTop.valid) {
@@ -632,7 +659,8 @@ void usage_widget_bar_cb(lv_event_t *e) {
     if (!usageTop.valid) return;
     const int8_t provider = g_uwOrder[(int)(intptr_t)lv_event_get_user_data(e)];
     const ProviderTop &pt = usageTop.providers[g_uwPeriod][provider];
-    static const char *NAMES[3] = {"Claude", "Codex", "OpenCode"};
+    static const char *NAMES[USAGE_PROVIDERS] =
+        {"Claude", "Codex", "OpenCode", "Command"};
 
     char title[24];
     snprintf(title, sizeof(title), "%s - %s", NAMES[provider], usage_period_label());
@@ -819,7 +847,25 @@ void update_header() {
 
     char clock[8];
     device_time_clock_str(clock, sizeof(clock));
-    set_text_if(g_clockLabel, g_cClock, sizeof(g_cClock), clock);
+
+    // Mudo precisa ser visivel: silencio sem indicacao e indistinguivel de alerta
+    // quebrado. O minuto arredonda para cima para nunca mostrar "mudo 0m" enquanto
+    // ainda ha janela.
+    // ASCII puro: LV_SYMBOL_MUTE (0xF026) NAO esta no unicode_list do
+    // lv_font_montserrat_16 (a lista salta de 0xf019 para 0xf030), entao viraria tofu.
+    // Ver a regra no topo deste arquivo.
+    const uint32_t snoozeLeft = snooze_remaining_s();
+    char label[24];
+    if (snoozeLeft) {
+        snprintf(label, sizeof(label), "%s mudo %lum", clock,
+                 (unsigned long)((snoozeLeft + 59) / 60));
+    } else {
+        snprintf(label, sizeof(label), "%s", clock);
+    }
+    set_text_if(g_clockLabel, g_cClock, sizeof(g_cClock), label);
+    set_color_if(g_clockLabel, g_cClockColor,
+                 snoozeLeft ? theme::COLOR_SNOOZE_DIM : theme::COLOR_TEXT_DIM,
+                 lv_obj_set_style_text_color);
 }
 
 void update_session_card(int i) {
@@ -865,9 +911,17 @@ void update_session_card(int i) {
     const bool ctxAlert = !s.stale && s.ctxPct >= theme::CTX_ALERT_PCT;
     const bool ctxPhase = ctxAlert && ((now / theme::CTX_BLINK_PERIOD_MS) % 2 == 0);
 
+    // Procedencia vencida: a marca do hook PermissionRequest passou de
+    // PERM_MARKER_MAX_AGE_S com a sessao ainda travada. Comecou exato e ficou velho
+    // demais para afirmar, entao empresta a linguagem visual do stale (roxo + "?") —
+    // que quer dizer a mesma coisa: o painel admite que nao sabe. Campo PROPRIO, e nao
+    // s.stale, para o /diag continuar distinguindo as duas causas.
+    const bool expired = s.severity == SeverityLevel::EXPIRED;
+
     // Dado velho tem cor propria: nao pode continuar exibindo o ultimo estado como se
     // ainda valesse (regra STALE_TIMEOUT_MS, ver docs/SPEC.md secao 3).
-    const uint32_t stateColor = s.stale ? theme::COLOR_STALE : color_for_state(s.state);
+    const uint32_t stateColor = (s.stale || expired) ? theme::COLOR_STALE
+                                                     : color_for_state(s.state);
 
     // Tempo (contexto, fonte menor)
     char buf[16];
@@ -876,8 +930,9 @@ void update_session_card(int i) {
     set_text_if(c.timeLabel, c.cTime, sizeof(c.cTime), buf);
 
     // Status (acao, fonte maior e colorida)
+    // "perm?" em vez de "?" puro: diz o que ERA, mais a duvida sobre ainda ser.
     set_text_if(c.statusLabel, c.cStatus, sizeof(c.cStatus),
-                s.stale ? "?" : label_for_state(s.state));
+                s.stale ? "?" : expired ? "perm?" : label_for_state(s.state));
     set_color_if(c.statusLabel, c.cStatusColor, stateColor, lv_obj_set_style_text_color);
 
     // Borda + fundo. So 'perm' tinge o card inteiro: e o unico estado que bloqueia o
@@ -1137,18 +1192,25 @@ void picker_open() {
     lv_obj_move_foreground(g_picker);
 }
 
-// Alerta: enquanto houver sessao em perm/ask, a borda da tela pulsa na cor do estado
-// mais urgente. O painel passa a te chamar em vez de esperar voce olhar.
+// Alerta: enquanto houver sessao esperando por voce, a borda da tela fica na cor do
+// estado mais urgente — ESTATICA (ver comentario no bloco de cor abaixo). O movimento
+// e do pulso de backlight, que carrega a urgencia. Ver docs/SPEC.md secao 19.
 void update_alert() {
     SessionState worst = SessionState::IDLE;
+    bool expired = false;
     for (int i = 0; i < theme::SESSION_CARDS; i++) {
         const SessionData &s = sessions[i];
         if (!s.occupied || s.stale) continue;
+        // Procedencia vencida tambem chama: a sessao comecou em perm de verdade. Sem
+        // isso o backlight pulsaria com a tela sem nenhuma borda, e o operador nao
+        // teria como saber de onde vinha o pulso.
+        if (s.severity == SeverityLevel::EXPIRED) expired = true;
         if (s.state == SessionState::PERM) { worst = SessionState::PERM; break; }
         if (s.state == SessionState::ASK)  worst = SessionState::ASK;
     }
 
-    const bool alert = (worst == SessionState::PERM || worst == SessionState::ASK);
+    const bool alert = (worst == SessionState::PERM || worst == SessionState::ASK
+                        || expired);
     lv_obj_t *scr = lv_scr_act();
 
     if (!alert) {
@@ -1161,8 +1223,15 @@ void update_alert() {
     }
 
     g_alertOn = true;
-    const bool on = (millis() / theme::ALERT_PERIOD_MS) % 2 == 0;
-    const uint32_t c = on ? color_for_state(worst) : theme::COLOR_BG;
+    // Borda ESTATICA. Ela alternava entre a cor do estado e o fundo a cada 600ms, e
+    // num render FULL cada troca invalidava a tela: o alerta antigo custava ~3 frames
+    // por segundo, para sempre. Agora a borda diz O QUE espera (cor do estado, escrita
+    // so quando muda) e o pulso de backlight diz QUAO URGENTE e, sem custar frame.
+    // Ver docs/SPEC.md secao 19.
+    // Roxo quando o unico motivo do alerta e procedencia vencida: e a mesma cor que o
+    // card usa para "nao sei", entao a tela e o card contam a mesma historia.
+    const uint32_t c = (worst == SessionState::IDLE && expired)
+                       ? theme::COLOR_STALE : color_for_state(worst);
     if (c != g_cScreenBorder) {
         g_cScreenBorder = c;
         lv_obj_set_style_border_color(scr, theme::color(c), 0);

@@ -10,18 +10,22 @@ jobs:
   ci:
     name: Gate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
       - name: Cache PlatformIO and project build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.platformio
@@ -41,8 +45,15 @@ jobs:
       - name: Unit tests (pytest)
         run: python -m pytest tests/ -q
 
-      - name: Secret leak scan
+      - name: Local configured-secret copy check
         run: python tools/check_secrets.py
+
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
 
       - name: Build firmware (production)
         run: pio run -e esp32-s3-3v5-lcd

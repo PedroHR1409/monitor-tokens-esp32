@@ -40,7 +40,7 @@ def _parser() -> argparse.ArgumentParser:
 
     hooks = commands.add_parser("hooks", parents=[common], help="inspect hook setup")
     hook_commands = hooks.add_subparsers(dest="hooks_command", required=True)
-    hook_commands.add_parser("check", help="report Claude and Codex hook health")
+    hook_commands.add_parser("check", help="report Claude, Codex and Command Code hook health")
 
     service = commands.add_parser("service", parents=[common], help="manage the per-user daemon")
     service_commands = service.add_subparsers(dest="service_command", required=True)

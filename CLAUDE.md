@@ -12,8 +12,9 @@ Este projeto usa o workflow de 5 fases com agentes especializados (`.claude/`):
 ```
 
 - Briefs de features em `.claude/sdd/features/`; templates em `.claude/sdd/templates/`
-- Documentos de fase: `BRAINSTORM_*.md`, `DEFINE_*.md`, `DESIGN_*.md`,
-  `BUILD_REPORT.md`, `SHIPPED_*.md` (em `.claude/sdd/features/{feature}/`)
+- Documentos `BRAINSTORM_*.md`, `DEFINE_*.md` e `DESIGN_*.md` em
+  `.claude/sdd/features/`; `BUILD_REPORT_*.md` em `.claude/sdd/reports/`;
+  documentos `SHIPPED_*.md` em `.claude/sdd/archive/{feature}/`
 - Idioma dos artefatos: **português (pt-BR)**
 - Mudanças em fases anteriores: `/agentspec:iterate` (cascade-aware)
 - Agentes disponíveis (18): workflow (brainstorm/define/design/build/ship/iterate),
@@ -35,7 +36,7 @@ python tools/monitor.py doctor     # diagnóstico local
 
 1. **Segredos** só em `include/secrets.h` (gitignored); token nunca em logs/JSON
    (`***redacted***`). 
-2. **Tools PC só stdlib** (`tools/*.py`, Python 3.10+).
+2. **Tools PC só stdlib** (`tools/*.py`, Python 3.11+).
 3. **Protocolo `POST /sessions` aditivo** — sem quebrar contrato sem bump de versão.
 4. **Hooks em caminhos estáveis** (`tools/session_hook.py`, `perm_hook.py`,
    `dismiss.py`) — não mover sem reinstalar.

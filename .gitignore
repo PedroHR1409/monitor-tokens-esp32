@@ -1,10 +1,47 @@
+# PlatformIO and editors
 .pio/
 .vscode/
-include/secrets.h
+.idea/
+
+# Python bytecode, virtual environments, test and analysis caches
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Operating system and editor artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+
+# Local credentials and configuration
+include/secrets.h
+monitor.toml
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Local agent state
 tools/.dismissed.json
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
+.commandcode/
 
-# Local runtime configuration can contain the shared transport token.
-monitor.toml
+# Runtime logs and generated archive
+/tools/daemon.log
+/tools/daemon.err.log
+/ci_logs.zip

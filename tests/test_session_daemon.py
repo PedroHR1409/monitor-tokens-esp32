@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import io
+import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -21,6 +23,30 @@ from session_hook import record_event
 
 
 NOW = datetime(2026, 8, 27, 15, 0, tzinfo=timezone.utc)
+
+
+class TransportTimestampTests(unittest.TestCase):
+    def test_refreshes_v1_timestamp_after_slow_collection(self):
+        payload = {"generated_at": "old", "generated_at_epoch": 100}
+        result = session_daemon.refresh_transport_timestamp(
+            payload, previous_epoch=100, now=NOW)
+        self.assertEqual(int(NOW.timestamp()), result)
+        self.assertEqual(result, payload["generated_at_epoch"])
+        self.assertEqual(NOW.isoformat(), payload["generated_at"])
+
+    def test_keeps_v1_timestamp_monotonic_within_daemon(self):
+        payload = {"generated_at": "old", "generated_at_epoch": 100}
+        result = session_daemon.refresh_transport_timestamp(
+            payload, previous_epoch=int(NOW.timestamp()), now=NOW)
+        self.assertEqual(int(NOW.timestamp()) + 1, result)
+
+    def test_refreshes_v2_millisecond_timestamp(self):
+        payload = {"generated_at_epoch_ms": 100}
+        result = session_daemon.refresh_transport_timestamp(
+            payload, previous_epoch=100, now=NOW)
+        expected = int(NOW.timestamp() * 1000)
+        self.assertEqual(expected, result)
+        self.assertEqual(expected, payload["generated_at_epoch_ms"])
 
 
 class CodexClassificationTests(unittest.TestCase):
@@ -121,6 +147,105 @@ class CodexClassificationTests(unittest.TestCase):
             sessions = session_daemon.scan_codex_sessions(index, NOW, event_path=events)
         self.assertEqual([], sessions)
 
+    def test_state_database_discovers_live_thread_when_index_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "state.sqlite"
+            connection = sqlite3.connect(db)
+            connection.execute(
+                "CREATE TABLE threads ("
+                "id TEXT PRIMARY KEY, title TEXT, name TEXT, updated_at INTEGER, "
+                "updated_at_ms INTEGER, cwd TEXT, model TEXT, reasoning_effort TEXT, "
+                "archived INTEGER)"
+            )
+            connection.execute(
+                "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("db-live", "Live Codex", "", int(NOW.timestamp()),
+                 int(NOW.timestamp() * 1000), str(root), "gpt-live", "high", 0),
+            )
+            connection.commit()
+            connection.close()
+
+            sessions = session_daemon.scan_codex_sessions(
+                root / "missing-index.jsonl", NOW,
+                event_path=root / "missing-events.json",
+                state_db=db)
+
+        self.assertEqual(["db-live"], [item["id"] for item in sessions])
+        self.assertEqual("work", sessions[0]["state"])
+        self.assertEqual("Live Codex", sessions[0]["project"])
+        self.assertEqual("gpt-live", sessions[0]["model"])
+
+
+class CodexRolloutDiscoveryTests(unittest.TestCase):
+    """O session_index parou de receber sessoes novas (15/09/2026) e os hooks do
+    Codex nunca gravaram evento nesta maquina: a sessao nova nem aparecia e, quando
+    aparecia pelo indice, sempre ficava `free`. O rollout no disco e a identidade
+    E o sinal de vida."""
+
+    ROLLOUT = ("rollout-2026-09-15T10-40-04-"
+               "01a0a54b-d23e-7d10-b980-539fde366c30.jsonl")
+    SID = "01a0a54b-d23e-7d10-b980-539fde366c30"
+
+    def write_rollout(self, directory: Path, mtime: datetime) -> None:
+        path = directory / "2026" / "08" / "27" / self.ROLLOUT
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"timestamp":"2026-08-27T14:00:00Z","payload":{}}\n',
+                        encoding="utf-8")
+        epoch = mtime.timestamp()
+        os.utime(path, (epoch, epoch))
+
+    def test_session_only_on_disk_is_discovered_and_turn_is_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_rollout(root / "sessions", NOW)
+            sessions = session_daemon.scan_codex_sessions(
+                root / "session_index.jsonl", NOW, rollouts_dir=root / "sessions")
+        self.assertEqual([self.SID], [s["id"] for s in sessions])
+        self.assertEqual("work", sessions[0]["state"])   # rollout fresco = turno vivo
+        self.assertEqual("no_structured_event", sessions[0]["diagnostic"])
+        self.assertEqual(0, sessions[0]["elapsed"])
+
+    def test_index_recency_wins_when_newer_than_rollout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_rollout(root / "sessions", NOW - timedelta(minutes=10))
+            index = root / "session_index.jsonl"
+            index.write_text(json.dumps({
+                "id": self.SID, "thread_name": "proj",
+                "updated_at": NOW.isoformat()}) + "\n", encoding="utf-8")
+            sessions = session_daemon.scan_codex_sessions(
+                index, NOW, rollouts_dir=root / "sessions")
+        self.assertEqual(0, sessions[0]["_age"])         # indice mais novo vence
+        self.assertEqual("work", sessions[0]["state"])   # rollout de 10min = dentro da janela
+
+    def test_idle_rollout_beyond_work_window_is_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_rollout(root / "sessions", NOW - timedelta(hours=2))
+            sessions = session_daemon.scan_codex_sessions(
+                root / "session_index.jsonl", NOW, rollouts_dir=root / "sessions")
+        self.assertEqual("free", sessions[0]["state"])
+
+    def test_rollout_scan_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_rollout(root / "sessions", NOW)
+            sessions = session_daemon.scan_codex_sessions(
+                root / "session_index.jsonl", NOW)
+        self.assertEqual([], sessions)    # hermetico: sem rollouts_dir, nada vaza
+
+    def test_structured_event_wins_over_rollout_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_rollout(root / "sessions", NOW)
+            events = root / "events.json"
+            record_event({"session_id": self.SID}, "free", events, NOW)
+            sessions = session_daemon.scan_codex_sessions(
+                root / "session_index.jsonl", NOW, event_path=events,
+                rollouts_dir=root / "sessions")
+        self.assertEqual("free", sessions[0]["state"])   # hook vence o mtime
+
 
 class RankingTests(unittest.TestCase):
     def test_attention_states_rank_before_recency(self):
@@ -188,6 +313,28 @@ class IdentityFilterTests(unittest.TestCase):
         ]
         visible = session_daemon.filter_dismissed(sessions, {"full-A"})
         self.assertEqual(["full-B"], [s["id"] for s in visible])
+
+
+class MetaModelTests(unittest.TestCase):
+    def test_synthetic_model_is_skipped_for_the_real_one(self):
+        """Mensagem assistant `<synthetic>` (erro/interrupcao do harness) nao e
+        modelo: a tela de detalhe mostrava `<synthetic>` quando ela era a ultima
+        da sessao (medido no card k1co). O modelo real anterior vence."""
+        objs = [
+            {"type": "assistant",
+             "message": {"model": "claude-opus-5", "content": []}},
+            {"type": "assistant",
+             "message": {"model": "<synthetic>", "content": []}},
+        ]
+        branch, model, effort = session_daemon.meta_of(objs)
+        self.assertEqual("opus-5", model)
+        self.assertEqual("", branch)
+
+    def test_only_synthetic_models_leaves_model_empty(self):
+        objs = [{"type": "assistant",
+                 "message": {"model": "<synthetic>", "content": []}}]
+        _, model, _ = session_daemon.meta_of(objs)
+        self.assertEqual("", model)
 
 
 class PayloadFreshnessTests(unittest.TestCase):
@@ -313,6 +460,7 @@ class PayloadFreshnessTests(unittest.TestCase):
             })
             output = io.StringIO()
             with patch.object(session_daemon, "fetch_id_list", return_value=set()), \
+                 patch.object(session_daemon, "fetch_snooze", return_value=0), \
                  patch.object(session_daemon, "hook_warnings", return_value=[]), \
                  patch.object(session_daemon.urllib.request, "urlopen", side_effect=receive), \
                  redirect_stdout(output):
@@ -345,6 +493,8 @@ class PayloadFreshnessTests(unittest.TestCase):
                 return Response(b'{"hidden": []}')
             if request.full_url.endswith("/pinned"):
                 return Response(b'{"pinned": []}')
+            if request.full_url.endswith("/snooze"):
+                return Response(b'{"snooze_s": 0}')
             self.fail("unexpected request")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -368,10 +518,10 @@ class PayloadFreshnessTests(unittest.TestCase):
                     self.assertEqual(0, session_daemon.run(args, config))
             finally:
                 session_daemon.MONITOR_API_TOKEN = previous
-        self.assertEqual(["/hidden", "/pinned"],
+        self.assertEqual(["/hidden", "/pinned", "/snooze"],
                          [request.full_url.removeprefix("http://test-device:80")
                           for request in requests])
-        self.assertEqual([toml_token, toml_token],
+        self.assertEqual([toml_token] * 3,
                          [request.get_header("X-monitor-token") for request in requests])
         self.assertNotIn(toml_token, output.getvalue())
 
@@ -393,6 +543,82 @@ class CodexWindowTokenTests(unittest.TestCase):
             with patch.object(session_meta, "_rollout_for", return_value=rollout):
                 meta = session_meta.codex_meta("reset-session", NOW - timedelta(hours=1))
         self.assertEqual(40, meta["tokens"])
+
+
+def _session(session_id: str, state: str, severity: str, elapsed: int = 600,
+            project: str = "proj") -> dict:
+    return {"id": session_id, "state": state, "severity": severity,
+            "elapsed": elapsed, "project": project}
+
+
+class MaybeToastTests(unittest.TestCase):
+    """Covers session_daemon.maybe_toast's dedupe/snooze contract."""
+
+    def setUp(self):
+        # _toasted is module-level state; leaving it dirty across tests would
+        # make an earlier test's toast silently suppress a later one.
+        session_daemon._toasted.clear()
+
+    def tearDown(self):
+        session_daemon._toasted.clear()
+
+    def test_fires_once_per_session_state_pair(self):
+        """Firing twice for the same (session, state) would train the operator
+        to ignore the exact warning that matters."""
+        sessions = [_session("s1", "perm", "critical")]
+        with patch.object(session_daemon, "notify", return_value=True) as mock_notify:
+            first = session_daemon.maybe_toast(sessions, 0)
+            second = session_daemon.maybe_toast(sessions, 0)
+        self.assertEqual(1, first)
+        self.assertEqual(0, second)
+        mock_notify.assert_called_once()
+
+    def test_snooze_suppresses_even_critical_sessions(self):
+        """Muted must mean muted -- covering even escalations that started after
+        the snooze was set, not just the ones already known when it began."""
+        sessions = [_session("s1", "perm", "critical")]
+        with patch.object(session_daemon, "notify", return_value=True) as mock_notify:
+            result = session_daemon.maybe_toast(sessions, 15)
+        self.assertEqual(0, result)
+        mock_notify.assert_not_called()
+
+    def test_only_critical_severity_fires(self):
+        """warning/expired/none sessions must never produce a toast -- only
+        `critical` is loud enough to interrupt the operator."""
+        sessions = [
+            _session("s1", "perm", "warning"),
+            _session("s2", "perm", "expired"),
+            _session("s3", "work", "none"),
+        ]
+        with patch.object(session_daemon, "notify", return_value=True) as mock_notify:
+            result = session_daemon.maybe_toast(sessions, 0)
+        self.assertEqual(0, result)
+        mock_notify.assert_not_called()
+
+    def test_pair_leaving_the_list_can_alert_again_later(self):
+        """A session dropping off the board and returning to `critical` is a new
+        block, not a repeat of the one that already fired."""
+        sessions = [_session("s1", "perm", "critical")]
+        with patch.object(session_daemon, "notify", return_value=True) as mock_notify:
+            first = session_daemon.maybe_toast(sessions, 0)
+            middle = session_daemon.maybe_toast([], 0)
+            third = session_daemon.maybe_toast(sessions, 0)
+        self.assertEqual(1, first)
+        self.assertEqual(0, middle)
+        self.assertEqual(1, third)
+        self.assertEqual(2, mock_notify.call_count)
+
+    def test_broken_channel_does_not_become_a_retry_loop(self):
+        """The pair is marked as toasted before the notify() result is known, so
+        a broken channel does not retry every poll cycle -- that failure is the
+        doctor's job to surface, not the daemon loop's."""
+        sessions = [_session("s1", "perm", "critical")]
+        with patch.object(session_daemon, "notify", return_value=False) as mock_notify:
+            first = session_daemon.maybe_toast(sessions, 0)
+            second = session_daemon.maybe_toast(sessions, 0)
+        self.assertEqual(0, first)
+        self.assertEqual(0, second)
+        mock_notify.assert_called_once()
 
 
 if __name__ == "__main__":

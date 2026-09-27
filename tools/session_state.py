@@ -69,9 +69,13 @@ MAIN_BRANCHES = {"main", "master"}
 def session_display_name(project: str, branch: str) -> str:
     """Nome do card: BRANCH quando ela e o que distingue o trabalho (fora de
     main/master); nome do projeto quando a sessao esta na branch principal ou
-    fora de git. Regra unica para Claude/Codex/OpenCode."""
+    fora de git. Regra unica para Claude/Codex/OpenCode.
+
+    "sem git" nunca vira titulo: varios cards de projetos distintos exibiam a
+    MESMA string e o operador nao sabia qual sessao era — sem branch, o nome do
+    projeto/cwd e sempre mais identificavel (ex.: a pasta do worktree)."""
     b = strip_accents(branch or "").strip()
-    if b and b.lower() not in MAIN_BRANCHES:
+    if b and b.lower() not in MAIN_BRANCHES and b.lower() != "sem git":
         return b
     return project
 

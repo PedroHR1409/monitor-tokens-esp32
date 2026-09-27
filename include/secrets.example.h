@@ -4,4 +4,8 @@
 // include/secrets.h e ignorado pelo Git e nunca deve ser compartilhado.
 #define WIFI_SSID     "NOME_DA_REDE"
 #define WIFI_PASSWORD "SENHA_DA_REDE"
-#define MONITOR_API_TOKEN "TOKEN_LOCAL_LONGO_E_ALEATORIO"
+// Rede secundaria (opcional). A ordem acima e a prioridade da conexao.
+#define WIFI_SSID_2     "NOME_DA_REDE_2"
+#define WIFI_PASSWORD_2 "SENHA_DA_REDE_2"
+// Curto de proposito: o fallback sem secrets.h nao aceita chamadas autenticadas.
+#define MONITOR_API_TOKEN "CONFIGURE"

@@ -4,7 +4,7 @@
 
 // Ver docs/SPEC.md secao 3.
 
-enum class ToolType : uint8_t { CLAUDE = 0, CODEX = 1, OPENCODE = 2, UNKNOWN = 3 };
+enum class ToolType : uint8_t { CLAUDE = 0, CODEX = 1, OPENCODE = 2, COMMANDCODE = 3, UNKNOWN = 4 };
 
 // Vocabulario fechado. Ver tools/session_state.py para como cada um e detectado.
 enum class SessionState : uint8_t {
@@ -14,6 +14,22 @@ enum class SessionState : uint8_t {
     FREE  = 3,  // sessao existe e o modelo esta livre
     IDLE  = 4,  // slot sem sessao
     ERROR_STATE = 5
+};
+
+// Urgencia de um estado que bloqueia o agente. NAO e um estado: `perm` continua
+// `perm` aos 10s e aos 6min — o que muda e ha quanto tempo espera. Quem calcula e o
+// daemon (tools/alert_severity.py), porque os limiares moram no monitor.toml e mudar
+// um deles nao pode exigir reflash. O firmware so traduz em pulso.
+//
+// A ordem numerica E a ordem de urgencia: o pulso e global (backlight = tela toda),
+// entao a pior severidade entre os cards manda. CRITICAL vence EXPIRED porque e sinal
+// exato vivo, e uma admissao de ignorancia nao deve gritar mais alto que um sinal
+// valido. Ver docs/SPEC.md secao 19.
+enum class SeverityLevel : uint8_t {
+    NONE     = 0,
+    WARNING  = 1,   // passou de alerts.warning_after_s
+    EXPIRED  = 2,   // marca de perm venceu: comecou exato, ficou velho demais
+    CRITICAL = 3    // passou de alerts.critical_after_s, com procedencia estruturada
 };
 
 // UUIDs Claude/Codex completos cabem sem truncamento. IDs maiores sao rejeitados no
@@ -37,6 +53,9 @@ struct SessionData {
                                     // o teto do historico, Codex le model_context_window.
     ToolType     tool;
     SessionState state;
+    SeverityLevel severity;         // urgencia calculada pelo daemon; campo aditivo do
+                                    // payload. Ausente (daemon legado) = NONE, e o
+                                    // painel volta ao comportamento anterior.
 
     // Ancora do contador. O tempo exibido e SEMPRE (millis() - stateStartedAtMillis),
     // nunca um acumulador incrementado a cada refresh: refresh atrasado nao pode virar
@@ -122,6 +141,7 @@ struct UsageHistory {
 // exibe nome/tokens (deep-link fica para o /iterate).
 #define TOP_SESSIONS 6
 #define USAGE_PERIODS 3                 // d1, d7, d30
+#define USAGE_PROVIDERS 4               // claude, codex, opencode, commandcode
 struct ProviderTop {
     uint32_t total;                     // soma COMPLETA das sessoes do provider
     uint8_t  count;                     // sessoes recebidas (<= TOP_SESSIONS)
@@ -129,6 +149,6 @@ struct ProviderTop {
     uint32_t tokens[TOP_SESSIONS];
 };
 struct UsageTop {
-    ProviderTop providers[USAGE_PERIODS][3];   // [periodo][claude|codex|opencode]
+    ProviderTop providers[USAGE_PERIODS][USAGE_PROVIDERS];  // [periodo][claude|codex|opencode|commandcode]
     bool valid;
 };

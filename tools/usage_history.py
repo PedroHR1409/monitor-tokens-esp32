@@ -9,9 +9,9 @@ Semântica de consumo (fixada no DEFINE): input + output + reasoning + cache.wri
 cache.read é re-leitura de contexto, não queima nova — incluiria ~3,4M contra ~150k
 reais num dia típico e esconderia a vareração que importa.
 
-O backfill é one-shot (primeiro boot com tabela vazia) e usa INSERT OR IGNORE:
-nunca sobrescreve linha viva, e dias sem cobertura nos arquivos ficam de fora
-(em vez de serem inventados como 0) — a janela do payload completa com 0 depois.
+O backfill normal preenche apenas dias sem linha. Em uma execução forçada,
+porém, ele pode substituir linhas antigas para reparar dados calculados antes
+de uma fonte ficar disponível.
 """
 from __future__ import annotations
 
@@ -23,7 +23,9 @@ from pathlib import Path
 
 from session_state import parse_ts
 
-RETENTION_DAYS = 35
+# Alinhado a StorageSettings.retention_days (monitor_config). O daemon passa o valor
+# do config explicitamente; esta constante e so o default de chamadas diretas.
+RETENTION_DAYS = 30
 WINDOW_DAYS = 30
 
 _SCHEMA = ("CREATE TABLE IF NOT EXISTS usage_history ("
@@ -98,8 +100,9 @@ def is_empty(db_path: Path) -> bool:
 
 def backfill(db_path: Path, *, claude_dir: Path | None, rollouts_dir: Path | None,
              opencode_db: Path | None, tz: timezone, now: datetime | None = None,
-             days: int = WINDOW_DAYS) -> dict[str, int]:
-    """Preenche apenas dias sem linha (INSERT OR IGNORE). Devolve o que gravou."""
+             days: int = WINDOW_DAYS, commandcode_dir: Path | None = None,
+             replace_existing: bool = False) -> dict[str, int]:
+    """Reconstrói o histórico; opcionalmente substitui linhas existentes."""
     buckets: dict[date, int] = {}
     seen: set = set()
     observed = now or datetime.now(timezone.utc)
@@ -112,17 +115,25 @@ def backfill(db_path: Path, *, claude_dir: Path | None, rollouts_dir: Path | Non
         _backfill_codex(rollouts_dir, window_start, tz, buckets)
     if opencode_db is not None and Path(opencode_db).is_file():
         _backfill_opencode(opencode_db, window_start, tz, buckets)
+    if commandcode_dir is not None and Path(commandcode_dir).is_dir():
+        _backfill_commandcode(commandcode_dir, window_start, tz, buckets)
 
-    inserted: dict[str, int] = {}
+    recorded: dict[str, int] = {}
     with _connect(db_path) as con:
         for day, tokens in sorted(buckets.items()):
             if tokens <= 0:
                 continue
-            cursor = con.execute("INSERT OR IGNORE INTO usage_history(day, tokens) "
-                                 "VALUES (?, ?)", (day.isoformat(), tokens))
+            if replace_existing:
+                cursor = con.execute(
+                    "INSERT INTO usage_history(day, tokens) VALUES (?, ?) "
+                    "ON CONFLICT(day) DO UPDATE SET tokens = excluded.tokens",
+                    (day.isoformat(), tokens))
+            else:
+                cursor = con.execute("INSERT OR IGNORE INTO usage_history(day, tokens) "
+                                     "VALUES (?, ?)", (day.isoformat(), tokens))
             if cursor.rowcount:
-                inserted[day.isoformat()] = tokens
-    return inserted
+                recorded[day.isoformat()] = tokens
+    return recorded
 
 
 def _backfill_claude(projects_dir: Path, window_start: datetime, tz: timezone,
@@ -184,5 +195,14 @@ def _backfill_opencode(opencode_db: Path, window_start: datetime, tz: timezone,
     from opencode_sessions import turn_token_events
 
     for timestamp, tokens in turn_token_events(opencode_db, window_start):
+        day = timestamp.astimezone(tz).date()
+        buckets[day] = buckets.get(day, 0) + tokens
+
+
+def _backfill_commandcode(projects_dir: Path, window_start: datetime, tz: timezone,
+                          buckets: dict[date, int]) -> None:
+    from commandcode_sessions import turn_token_events
+
+    for timestamp, tokens in turn_token_events(projects_dir, window_start):
         day = timestamp.astimezone(tz).date()
         buckets[day] = buckets.get(day, 0) + tokens

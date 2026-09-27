@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Instala hooks estruturados do Monitor.AI em ~/.codex/hooks.json."""
+"""Instala hooks estruturados do Monitor.AI no CODEX_HOME/hooks.json."""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +12,9 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-HOOKS_FILE = Path.home() / ".codex" / "hooks.json"
+from codex_paths import CODEX_HOOKS
+
+HOOKS_FILE = CODEX_HOOKS
 HOOK_SCRIPT = (Path(__file__).parent / "session_hook.py").resolve()
 EVENTS = {
     "SessionStart": "free",
