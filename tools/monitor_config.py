@@ -73,6 +73,7 @@ class UsageSettings:
     claude_context_window: int = 0
     claude_5h_budget: int = 0
     opencode_context_window: int = 0
+    commandcode_context_window: int = 0
 
 
 @dataclass(frozen=True)
@@ -136,7 +137,7 @@ class MonitorConfig:
         transport = TransportSettings(**transport_values)
         usage = UsageSettings(**_section(values, "usage", {
             "claude_context_window": 0, "claude_5h_budget": 0,
-            "opencode_context_window": 0,
+            "opencode_context_window": 0, "commandcode_context_window": 0,
         }))
         alerts = AlertSettings(**_section(values, "alerts", {
             "warning_after_s": 90, "critical_after_s": 300, "snooze_minutes": 15,
@@ -184,6 +185,7 @@ api_token = \"\"
 # claude_context_window = 0
 # claude_5h_budget = 0
 # opencode_context_window = 0
+# commandcode_context_window = 0
 
 [alerts]
 # warning_after_s = 90
@@ -235,6 +237,10 @@ def _validate_root_keys(values: Mapping[str, Any]) -> None:
 def _redact(value: Any, field_name: str = "") -> Any:
     normalized = field_name.lower().replace("-", "_")
     if any(marker in normalized for marker in ("token", "secret", "password", "api_key")):
+        # Campo sensivel vazio nao esconde segredo nenhum: devolve-lo como "" mantem
+        # config show e doctor contando a mesma historia. Valor real nunca aparece.
+        if value is None or value == "":
+            return value
         return "***redacted***"
     if isinstance(value, dict):
         return {str(key): _redact(item, str(key)) for key, item in value.items()}
@@ -287,6 +293,8 @@ def _validate(config: MonitorConfig) -> None:
     _non_negative_int(config.usage.claude_context_window, "usage.claude_context_window")
     _non_negative_int(config.usage.claude_5h_budget, "usage.claude_5h_budget")
     _non_negative_int(config.usage.opencode_context_window, "usage.opencode_context_window")
+    _non_negative_int(config.usage.commandcode_context_window,
+                      "usage.commandcode_context_window")
     _non_negative_int(config.alerts.warning_after_s, "alerts.warning_after_s")
     _non_negative_int(config.alerts.critical_after_s, "alerts.critical_after_s")
     _non_negative_int(config.alerts.snooze_minutes, "alerts.snooze_minutes")

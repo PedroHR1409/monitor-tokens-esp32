@@ -94,7 +94,7 @@ const supabase = createClient(url, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 // Only use service role for trusted backend operations.
 
 // Hardcoding a secret
-const stripeKey = "sk_live_abc123...";
+const stripeKey = "REPLACE_WITH_STRIPE_SECRET_KEY";
 ```
 
 ### Correct

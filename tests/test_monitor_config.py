@@ -201,6 +201,16 @@ api_token = "toml-secret"
         self.assertNotIn("test-fixture-token", repr(redacted))
         self.assertEqual("monitor-ai.local", redacted["device"]["host"])
 
+    def test_redacted_dict_keeps_an_unconfigured_token_empty(self):
+        """Marking an empty token as redacted made config show disagree with doctor,
+        which reports the same snapshot as 'no transport token configured'."""
+        from monitor_config import MonitorConfig
+
+        config = MonitorConfig.load(path=Path("does-not-exist.toml"), environ={})
+        redacted = config.redacted_dict()
+
+        self.assertEqual("", redacted["transport"]["api_token"])
+
     def test_write_example_contains_no_secret_and_is_private(self):
         """An example config containing credentials or broad permissions would leak on shared hosts."""
         from monitor_config import write_example

@@ -33,6 +33,18 @@ TransportDataStatus session_transport_data_status();
 // IP atual, ou "sem WiFi". Aparece no heartbeat para nao se perder no log de boot.
 String session_transport_ip_string();
 
+// Pior severidade entre os cards ocupados e nao-stale. O pulso e global (backlight =
+// tela toda), entao uma severidade so pode reger a tela.
+SeverityLevel session_worst_severity();
+
+// Duracao do mudo (minutos) declarada em alerts.snooze_minutes e recebida no
+// payload; cai no SNOOZE_MINUTES_DEFAULT compilado com daemon legado.
+uint32_t session_snooze_minutes();
+
+// A mesma coisa, mas zerada enquanto o snooze estiver armado. E esta que o loop usa
+// para pulsar: o mudo silencia o painel inteiro, nao uma sessao.
+SeverityLevel session_alert_severity();
+
 // Estatisticas agregadas do ultimo POST (cards de tokens e sparkline).
 extern UsageStats usageStats;
 

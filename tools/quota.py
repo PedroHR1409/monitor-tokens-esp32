@@ -30,6 +30,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from commandcode_sessions import window_tokens as commandcode_window_tokens
 from opencode_sessions import window_tokens
 
 from session_meta import CODEX_SESSIONS
@@ -237,14 +238,18 @@ def claude_consumption(projects_dir: Path, now: datetime | None = None,
 
 def collect(projects_dir: Path, now: datetime | None = None,
             sessions_dir: Path | None = None,
-            opencode_db: Path | None = None) -> dict:
+            opencode_db: Path | None = None,
+            commandcode_dir: Path | None = None) -> dict:
     """Bloco `quota` do payload: o oficial e o estimado, cada um marcado como tal."""
     now = now or datetime.now(timezone.utc)
     cx = codex_quota(sessions_dir, now)
     cl = claude_consumption(projects_dir, now)
     oc_since = (now - timedelta(seconds=CLAUDE_WINDOW_S)).timestamp()
-    # opencode_db=None desliga a coleta (tests hermetico); o daemon passa caminho real
+    # opencode_db/commandcode_dir=None desliga a coleta (teste hermetico); o daemon
+    # passa os caminhos reais.
     oc_tokens = window_tokens(opencode_db, oc_since) if opencode_db is not None else 0
+    cc_tokens = (commandcode_window_tokens(commandcode_dir, oc_since)
+                 if commandcode_dir is not None else 0)
     return {
         "window_h": CLAUDE_WINDOW_H,
         "codex": {
@@ -268,6 +273,12 @@ def collect(projects_dir: Path, now: datetime | None = None,
             "ok": oc_tokens > 0,
             "official": False,
             "tokens": oc_tokens,
+            "pct": 0,
+        },
+        "commandcode": {
+            "ok": cc_tokens > 0,
+            "official": False,
+            "tokens": cc_tokens,
             "pct": 0,
         },
     }

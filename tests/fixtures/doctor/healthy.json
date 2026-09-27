@@ -11,12 +11,18 @@
   },
   "hooks": {
     "claude": true,
-    "codex": true
+    "codex": true,
+    "commandcode": true
+  },
+  "notify": {
+    "available": true,
+    "detail": "fixture"
   },
   "paths": {
     "claude": true,
     "codex": true,
-    "opencode": true
+    "opencode": true,
+    "commandcode": true
   },
   "platformio": {
     "available": true

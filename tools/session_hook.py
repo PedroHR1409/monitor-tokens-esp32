@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_events import MAX_FUTURE_SKEW_S, parse_aware_timestamp
+from codex_paths import CODEX_EVENT_FILE, CODEX_HOOKS
 
 QUESTION_TOOLS = frozenset({
     "AskUserQuestion", "ExitPlanMode", "request_user_input", "requestUserInput",
@@ -23,7 +24,7 @@ QUESTION_TOOLS = frozenset({
 # tecnicamente correto e completamente inutil para achar a causa. Por isso a saude do
 # hook virou algo consultavel. Ver docs/SPEC.md secao 16.
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
-CODEX_HOOKS = Path.home() / ".codex" / "hooks.json"
+COMMANDCODE_SETTINGS = Path.home() / ".commandcode" / "settings.json"
 ACTION_STATE = {
     "work": "work",
     "pre_tool_use": "work",
@@ -102,9 +103,10 @@ def hook_installed(path: Path, agent: str, events: frozenset | None = None) -> b
 
 
 def hook_health() -> dict:
-    """{'claude': bool, 'codex': bool} — o hook de cada agente esta instalado?"""
+    """{'claude': bool, 'codex': bool, 'commandcode': bool} — hooks instalados?"""
     return {"claude": hook_installed(CLAUDE_SETTINGS, "claude"),
-            "codex": hook_installed(CODEX_HOOKS, "codex")}
+            "codex": hook_installed(CODEX_HOOKS, "codex"),
+            "commandcode": hook_installed(COMMANDCODE_SETTINGS, "commandcode")}
 
 
 def load_event_store(path: Path) -> dict:
@@ -170,7 +172,9 @@ def record_event(payload: dict, action: str, state_path: Path,
 
 
 def _default_path(provider: str) -> Path:
-    base = ".codex" if provider == "codex" else ".claude"
+    if provider == "codex":
+        return CODEX_EVENT_FILE
+    base = {"commandcode": ".commandcode"}.get(provider, ".claude")
     return Path.home() / base / "monitor-ai-events.json"
 
 

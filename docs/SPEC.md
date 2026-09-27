@@ -1,4 +1,4 @@
-# SPEC — Monitor de Sessões Claude/Codex (ESP32-S3)
+# SPEC — Monitor.AI (ESP32-S3)
 
 Status: dados reais em produção · UI grid 3x3 + retângulo · v0.3
 
@@ -45,7 +45,7 @@ para o bug de inicialização que isso revelou e corrigiu.
 ## 3. Modelo de dados da sessão
 
 ```cpp
-enum class ToolType : uint8_t { CLAUDE, CODEX, UNKNOWN };
+enum class ToolType : uint8_t { CLAUDE, CODEX, OPENCODE, COMMANDCODE, UNKNOWN };
 
 // Vocabulário fechado — ver secção 6.1 para o significado de cada um.
 enum class SessionState : uint8_t { WORK, ASK, PERM, FREE, IDLE, ERROR_STATE };
@@ -89,7 +89,8 @@ Regras:
     {"id": "sess-01", "project": "monitor-tokens-esp32", "tool": "claude", "state": "work", "elapsed": 12}
   ]}
   ```
-  `tool`: `"claude"` | `"codex"` | `"opencode"`. `state`: `"work"` | `"ask"` | `"perm"` | `"free"` (mapeados para
+  `tool`: `"claude"` | `"codex"` | `"opencode"` | `"commandcode"` (desconhecido por firmware antigo → 422, com
+  degradação para o baseline Claude/Codex no daemon). `state`: `"work"` | `"ask"` | `"perm"` | `"free"` (mapeados para
   `SessionState` em `session_transport.cpp`). Slots não enviados numa atualização voltam a `occupied=false`
   (sessão encerrada no PC). `elapsed` é a idade em segundos calculada pelo daemon — o firmware não soma mais
   localmente em modo de dados reais, só exibe o último valor recebido (evita deriva de relógio entre PC e ESP32).
@@ -98,6 +99,10 @@ Regras:
   DeepSeek → DeepSeek) e cai no ícone clássico da ferramenta quando vem vazio — Claude/Codex
   continuam sem o campo, então o contrato é retrocompatível (ver seção 6.2).
 - `GET /health` — heartbeat simples.
+- **Autenticação HTTP**: todas as rotas, exceto `GET /health`, exigem o header
+  `X-Monitor-Token`. O token precisa ter pelo menos 16 caracteres; o placeholder
+  curto do firmware de fallback falha fechado. HTTP não cifra esse header, então
+  o painel deve ficar apenas em uma rede local confiável.
 - **Direção PC → ESP32**: `tools/session_daemon.py` (só biblioteca padrão do Python, sem `pip install`) faz
   *polling* — não há hooks instalados por padrão (ver justificativa abaixo) — a cada `--interval` segundos
   (padrão 5s) e dá `POST /sessions`.
@@ -128,6 +133,27 @@ Regras:
 > não precisa substituir os que já existem) que grave `{"event", "ts"}` num arquivo por sessão; o daemon leria
 > esse arquivo em vez de inferir estado do transcript. Não implementado aqui de propósito, para não editar a
 > configuração viva do Claude Code sem pedido explícito.
+
+### Rede: duas credenciais, com a ordem como prioridade
+
+`include/secrets.h` declara **duas** redes (`WIFI_SSID`/`WIFI_PASSWORD` e
+`WIFI_SSID_2`/`WIFI_PASSWORD_2`). A **ordem no array é a prioridade**: o painel tenta a
+primeira e só cai para a segunda se ela não responder.
+
+Três regras fixadas:
+
+- **Orçamento de boot único.** `session_transport_init()` roda antes de
+  `ui_dashboard_init()`, com a tela ainda preta. O relógio de `WIFI_CONNECT_TIMEOUT_MS`
+  (15s) é **compartilhado** entre as credenciais (≈7,5s cada), então o total nunca passa
+  de 15s — tentar cada rede por 15s viraria 30s de tela preta.
+- **Sem `scan`.** A escolha é por ordem, não por RSSI: nada de `WiFiMulti`/varredura no
+  `loop()`, que apareceria como pico em `maxTransportMs` no `/diag` (o render é FULL).
+- **Alternância só após falha.** No retry de `WIFI_RETRY_INTERVAL_MS`, a credencial atual
+  é tentada de novo; só depois de uma falha nela o índice avança. Uma queda breve não
+  joga o painel para a outra rede.
+
+O PC não precisa saber qual rede está ativa: o daemon fala com `monitor-ai.local` (mDNS),
+que resolve nas duas. O log serial informa a rede vencedora sem imprimir senha.
 
 ## 5.1. Deteccao de estado — a reescrita determinística (fase 4)
 
@@ -402,6 +428,7 @@ condicao de toque valido correta (`data[0] == 0 && data[1] != 0`).
 
 ### GET /diag
 
+Exige `X-Monitor-Token`, como as outras rotas além de `GET /health`.
 Validar "um toque real gera o evento esperado" pelo log serial exige alguem lendo o
 monitor no instante do toque. O endpoint expoe contadores que permitem confirmar de
 fora: `touches` sobe => o driver leu o hardware; `pomo_clicks` sobe => o evento chegou ao
@@ -842,3 +869,206 @@ atribuida e a do inicio da resposta.
   **branch** quando ela nao e `main`/`master`; **nome do projeto** quando e. Ex.:
   `fix-28796-ajustes` (worktree), `feat/27816-remover-monolitico` (repo principal em
   feature branch), `monitor-tokens-esp32` (master).
+
+## 19. Alerta escalonado: pulso de backlight, snooze e toast (fase 8)
+
+**O problema.** O alerta era binario. `update_alert()` elegia o pior estado
+(`PERM` > `ASK`) e pulsava uma borda de 4px: um `perm` de 10 segundos e um de 40
+minutos produziam exatamente o mesmo pixel. E nada avisava quem nao estava olhando
+para a mesa. Os tres campos de `[alerts]` no `monitor.toml`
+(`warning_after_s`, `critical_after_s`, `snooze_minutes`) existiam, eram parseados e
+validados desde a fase de config — e **nao tinham um unico consumidor no repo**.
+
+### Por que backlight, e nao a tela pela LVGL
+
+Pulsar o fundo pela LVGL reintroduziria o bug que a fase 4 corrigiu: o render e FULL,
+cada invalidacao custa um frame de 307KB, e um pulso de 2-3Hz seria isso continuamente
+enquanto qualquer sessao estivesse em `ask`/`perm`. Pior: os cards cobrem ~90% da
+largura (3 celulas de 96px em 320px), entao o fundo so apareceria nas calhas de 8px —
+uma trelica fina piscando, nao "a tela".
+
+O pulso de PWM no backlight custa **zero** invalidacao, atinge 100% da tela e, de
+graca, resolve o modo noturno: a faixa do `critical` e absoluta (40-255) e portanto
+fura o base noturno de 60.
+
+**Medida do alerta antigo, que ninguem havia notado:** a borda alternava cor a cada
+600ms via `lv_obj_set_style_border_color`, ou seja, o alerta ja custava ~3 frames por
+segundo, indefinidamente. Nesta fase a borda virou **estatica** — ela diz O QUE espera
+(cor do estado) e o pulso diz QUAO URGENTE e. O custo de render do alerta **caiu**.
+
+### Quem decide a severidade
+
+O daemon, nao o firmware (`tools/alert_severity.py`, funcao pura). Se o firmware
+comparasse `elapsed` contra constantes compiladas, mudar `critical_after_s` exigiria
+reflash — e o toast nasce no PC, entao a mesma regra existiria duas vezes, em C++ e em
+Python, com metade coberta por teste. O campo `severity` viaja como campo **aditivo** do
+`POST /sessions`; firmware antigo o ignora (a validacao de `handle_sessions_post` e por
+whitelist, verificado).
+
+| Severidade | Origem | Pulso |
+|---|---|---|
+| `none` | fora de `ask`/`perm`, ou antes de `warning_after_s` | estavel no base |
+| `warning` | passou de `warning_after_s` | ~2000ms, base +-30% |
+| `critical` | passou de `critical_after_s` **com procedencia estruturada** | ~700ms, 40-255 |
+| `expired` | marca do hook de `perm` venceu com a sessao ainda travada | ~1200ms |
+
+**Teto de procedencia.** Estado inferido para em `warning` e nunca dispara toast. Num
+Codex sem hook, `ask` significa "arquivo tocado ha <90s", nao "existe pergunta
+esperando" — gritar ali seria alarme falso. E a mesma cultura de procedencia explicita
+da cota (secao 15): o oficial e o estimado nao tem o mesmo peso.
+
+**Agregacao.** O backlight e um recurso unico e global, entao a pior severidade entre
+os cards manda, na ordem `critical` > `expired` > `warning` > `none` — espelhando o
+`STATE_PRIORITY` do daemon para nao existirem duas escalas discordando. `critical` vence
+`expired` porque e sinal exato vivo, e uma admissao de ignorancia nao deve gritar mais
+alto que um sinal valido.
+
+### `expired`: o alerta que desistia justamente no pior caso
+
+`PERM_MARKER_MAX_AGE_S` (600s) existe para o caso do Claude Code morrer com o dialogo
+aberto: passado esse prazo a marca do hook e descartada. Efeito colateral descoberto
+nesta fase: um `perm` **real** que voce demorasse 12 minutos para responder perdia o
+alerta aos 10 — o painel voltava ao normal com o agente ainda travado.
+
+A saida foi a severidade `expired`, que empresta a linguagem visual do `stale` (roxo +
+`perm?`) porque quer dizer a mesma coisa: o painel admite que nao sabe, em vez de mentir
+que o estado ainda vale.
+
+**E `expired` tambem decai**, em `EXPIRED_MAX_AGE_S` (1200s). Sem limite, uma marca orfa
+produziria pulso eterno — pior que o `perm` falso de 191 horas da fase 4, porque agora o
+sintoma seria a tela inteira piscando. Duas guardas nao-heuristicas sustentam isso:
+o teto de 20 minutos, e a regra de que **a marca so vale enquanto for a evidencia mais
+recente** — se um evento estruturado chegou depois dela, a permissao ja foi resolvida e
+a marca apenas nao foi limpa.
+
+### Snooze: toque no header
+
+O header (320x34) era a unica superficie grande e inerte do painel: toque curto e toque
+longo nos cards ja tem dono (detalhe e esconder), e a tela de detalhe tem decisao
+registrada contra botao dedicado. Tocar arma o mudo; tocar de novo desarma.
+
+- **Mudo e mudo.** A janela cobre inclusive escalada nascida depois do toque. Contrato
+  previsivel (silencio ate acabar, sem excecao) em troca de nao guardar quais sessoes
+  estavam alertando. Custo aceito: ate `snooze_minutes` de cegueira.
+- **`GET /snooze` devolve segundos restantes, nunca timestamp** — os dois relogios sao
+  independentes e duracao relativa nao tem fuso nem skew (mesmo racional de `elapsed`,
+  secao 5). O daemon le a cada ciclo e suprime o toast.
+- **Nao persiste em NVS**, ao contrario de `hidden`/`pinned`: `millis()` reinicia no
+  boot e quem religou o painel quer ver o estado real, nao um mudo herdado.
+- A duracao vem do payload (`snooze_minutes`), nao de constante compilada — trocar o
+  valor no `monitor.toml` nao pode exigir reflash. `SNOOZE_MINUTES_DEFAULT` e so o
+  fallback para daemon legado.
+
+### Toast no PC
+
+`tools/notify.py`, stdlib puro: PowerShell no Windows, `notify-send` no Linux. Dispara
+**uma vez** por par (sessao, estado) que cruza `critical`, e nunca a partir de estado
+inferido. Repetir treina o operador a ignorar justamente o aviso que importa — e o mesmo
+principio que o daemon ja aplica aos avisos de hook.
+
+Duas propriedades que nao sao detalhe de implementacao:
+
+1. **Titulo e corpo entram por ambiente, nunca interpolados no comando.** O nome exibido
+   vem do `cwd` do transcript, um caminho controlado pelo usuario que pode conter aspas,
+   `$`, backtick e ponto-e-virgula. Interpolar seria injecao de comando; `env=` e `argv`
+   nao passam por shell. Nunca `shell=True`.
+2. **Fire-and-forget.** O balao do Windows exige que o processo fique vivo enquanto
+   aparece (`Start-Sleep -Seconds 6`), e esperar por ele bloquearia o ciclo do daemon
+   por mais tempo que o proprio intervalo de 5s — o payload atrasaria e o anti-replay da
+   placa passaria a ver ciclos fora de ordem. O retorno diz "consegui disparar", nao "o
+   usuario viu".
+
+### Diagnostico
+
+`GET /diag` ganhou o bloco `alert` — `severity` (efetiva), `raw_severity` (antes do
+mudo), `snooze_s`, `pulse_level` e `pulse_base`. Mesma razao de existir do resto do
+`/diag`: provar o comportamento de fora, sem depender de alguem olhando a tela no
+instante do pulso. E `monitor.py doctor` ganhou a checagem do canal de notificacao,
+porque o toast falha em **silencio**: sem PowerShell no PATH o alerta critico
+simplesmente nunca aparece e nada avisaria.
+
+## 20. Command Code: quarto provedor (transcript JSONL + hooks)
+
+**O que e.** O Command Code e o quarto agente que o painel acompanha, ao lado de
+Claude, Codex e OpenCode. Ele guarda cada sessao num arquivo JSONL por projeto, em
+`~/.commandcode/projects/<slug>/<id>.jsonl`: um header `{"type":"session", "id", "cwd"}`
+e, depois, entradas `{"type":"message", ...}` com o turno e o `usage`
+(`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `costUsd`),
+`model` (ex.: `deepseek/deepseek-v4.1-flash`) e `effort`. Nao ha SQLite nem cota de
+servidor. Ver `tools/commandcode_sessions.py`.
+
+### So leitura, e nunca `auth.json`
+
+`~/.commandcode/` guarda tambem `auth.json`, com a API key em texto claro. O coletor
+enumera **apenas** `projects/**/*.jsonl`; nao existe caminho de codigo que abra
+credenciais. Restringir por construcao e mais forte que lembrar de nao ler.
+
+### Estados: hooks nativos + inferencia
+
+O Command Code emite `SessionStart`, `PreToolUse`, `PostToolUse` e `Stop` — **nao tem
+`PermissionRequest`** como o Claude/Codex. Os quatro eventos viram o vocabulario ja
+existente em `session_hook.ACTION_STATE` (nenhuma acao nova) e sao gravados em
+`~/.commandcode/monitor-ai-events.json`, o mesmo event store em que os outros dois
+agentes escrevem, reduzido pelo mesmo `agent_events.reduce_session_events`.
+
+O que os hooks nao cobrem e inferido do transcript:
+
+| Estado | Sinal |
+|---|---|
+| `ask` | ultimo assistente tem `tool_use` de `ask_user_question` sem `tool_result` |
+| `perm` | `tool_use` pendente nao-pergunta **e** nenhum `PreToolUse`/`PostToolUse` posterior a ele |
+| `work`/`free` | evento estruturado; sem evento, recencia (`WORK_MAX_AGE_S`) |
+
+**`perm` e o unico estado inferido**, e a inferencia e a suposicao mais fragil da
+feature (A-003 do DEFINE): assumimos que um `PreToolUse` so dispara quando a ferramenta
+vai executar, de modo que um pedido pendente sem hook = aguardando aprovacao. Para o
+modo de falha nao ser pior que o problema, o `perm` inferido decai em
+`PERM_MARKER_MAX_AGE_S` (600s) — a mesma guarda de evidencia do modulo de estado. Sem
+evidencia, a sessao cai para recencia; nunca inventa `ask`/`perm`.
+
+### Tokens e contexto
+
+**Armadilha medida:** o `inputTokens` do Command Code e o **prompt inteiro** e ja inclui
+o cache lido — numa sessao real, `input=394965` com `cacheRead=393984`. Somar `input` a
+cada turno reconta o contexto inteiro e infla o total em ordens de grandeza (medido:
+26M numa sessao de 15 min, 102M num dia). O que o turno queima **de novo** e
+`(inputTokens - cacheReadTokens) + outputTokens`; `cacheWriteTokens` fica dentro do
+`input` e nao e somado. O contexto da janela e o prompt inteiro (`inputTokens`), nao a
+soma com o cache. A dedup e por `message.messageId` (mesma razao do Claude).
+
+Como o transcript **nao** traz a janela do modelo (diferente do Codex), o denominador
+vem do catalogo publico do produto (`reference/models.md`, ~1M para os modelos
+listados) ou de `usage.commandcode_context_window` no `monitor.toml`; sem denominador,
+`quality` e `unknown` e nao ha percentual — nunca se fabrica uma porcentagem.
+
+### Cota, podio e firmware
+
+Sem cota oficial, o Command Code entra no bloco estimado junto de Claude/OpenCode
+(consumo bruto, `pct` 0). Alimenta o historico diario (heatmap) e o podio. No firmware
+o `tool` ganhou `ToolType::COMMANDCODE` (`parse_tool`), e o icone e resolvido pelo
+`provider` — sem asset novo. Firmware antigo rejeita o POST inteiro com 422; o daemon
+**generalizou** o fallback que antes so cobria `opencode`: reenvia apenas com a base
+Claude/Codex (`BASELINE_TOOLS`), avisando uma vez.
+
+**Podio de 4 provedores.** `UsageTop.providers` passou de 3 para 4 colunas
+(`USAGE_PROVIDERS`), com o `PROVIDERS[4]` do transporte. O widget desenha 4 barras
+lado a lado (rank 0 a esquerda, altura e cor decrescentes) e usa o nome curto
+**"Command"** para o Command Code — "CommandCode" nao cabe em 66px sem quebrar linha.
+O modal de drill-down tambem ganhou a 4a entrada.
+
+## 21. Reservas declaradas (sem consumidor funcional)
+
+Estes itens existem no `monitor.toml` e/ou no PC **como reserva explicita**. Nenhum tem
+consumidor funcional hoje; a decisao de arquivar (em vez de remover ou implementar) foi
+tomada em 2026-09-19 e esta registrada no `docs/ROADMAP.md`.
+
+| Item | Onde mora | Estado |
+|---|---|---|
+| `transport.prefer_websocket` | `monitor.toml` / `TransportSettings` | Reserva — HTTP simples e suficiente para <=6 sessoes em polling de 5s |
+| `daemon.role` | `monitor.toml` / `DaemonSettings` | Reserva — escopo single-machine; sempre `standalone` |
+| `storage.hourly_retention_days` | `monitor.toml` / `StorageSettings` | Reserva — o schema de `usage_history` e diario `(day, tokens)`; destrava o item #2 do ROADMAP |
+| `--protocol 2` / `tools/protocol_v2.py` | CLI + modulo Python | Reserva — o firmware serve so o v1 de `/sessions`; `--protocol 2` responde 404. O doctor declara isso em vez de "cannot be verified" |
+
+**`storage.retention_days` NAO e reserva:** e o valor efetivo do prune, repassado pelo
+daemon ate `usage_history.prune`. `usage_history.RETENTION_DAYS` (30) e apenas o default
+de chamadas diretas e espelha o default de `StorageSettings`.

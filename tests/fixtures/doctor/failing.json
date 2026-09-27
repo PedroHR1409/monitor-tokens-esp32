@@ -1,8 +1,8 @@
 {
   "config": {"present": false},
   "token": {"length": 0},
-  "paths": {"claude": true, "codex": true},
-  "hooks": {"claude": true, "codex": true},
+  "paths": {"claude": true, "codex": true, "commandcode": true},
+  "hooks": {"claude": true, "codex": true, "commandcode": true},
   "python": {"version": [3, 11]},
   "platformio": {"available": true},
   "storage": {"state": "fail", "detail": "fixture-password-must-never-appear"},

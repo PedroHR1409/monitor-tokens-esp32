@@ -99,11 +99,10 @@ def _rows(db: Path, query: str, params: tuple = ()) -> list[dict]:
         con.close()
 
 
-def _project_name(session: dict, branch: str) -> str:
-    """Nome do card pela regra unica: branch nao-principal vence o projeto.
-
-    Projeto = pasta do `directory` (o `title` do OpenCode e a primeira mensagem/
-    resumo, que nao identifica o projeto) com fallback title/slug."""
+def _project_raw_name(session: dict) -> str:
+    """Nome cru do projeto (sem a regra de branch) — pasta do `directory` (o
+    `title` do OpenCode e a primeira mensagem/resumo, que nao identifica o
+    projeto) com fallback title/slug."""
     directory = str(session.get("directory") or "")
     project = ""
     if directory.strip() and Path(directory).name.strip():
@@ -111,7 +110,12 @@ def _project_name(session: dict, branch: str) -> str:
     if not project:
         project = (strip_accents(str(session.get("title") or "")).strip()
                    or strip_accents(str(session.get("slug") or "opencode")))[:FULL_NAME_MAX]
-    display = session_display_name(project, branch)[:FULL_NAME_MAX]
+    return project or "opencode"
+
+
+def _project_name(session: dict, branch: str) -> str:
+    """Nome do card pela regra unica: branch nao-principal vence o projeto."""
+    display = session_display_name(_project_raw_name(session), branch)[:FULL_NAME_MAX]
     return display or "opencode"
 
 
@@ -156,12 +160,14 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
     db = database if database is not None else db_path()
     sessions = _rows(db, "SELECT * FROM session WHERE time_archived IS NULL "
                          "ORDER BY time_updated DESC")
-    signals = session_structured_states(db, now - timedelta(seconds=STATE_WINDOW_S))
+    signals, turn_ends = _part_states_from_rows(
+        _part_rows(db, now - timedelta(seconds=STATE_WINDOW_S)))
     if log_path is not None:
         for psid, ask_ts in perm_signals_from_log(log_path, now).items():
             current = signals.get(psid)
             if current is None or ask_ts > current[1]:
                 signals[psid] = ("perm", ask_ts)
+    turn_activity = turn_activity_from_log(log_path) if log_path is not None else {}
     if not sessions:
         return []
 
@@ -184,9 +190,22 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
         provider_db = str(model.get("providerID") or "")
         directory = str(session.get("directory") or "")
 
-        messages = _rows(db, "SELECT data, time_created, time_updated FROM message "
-                             "WHERE session_id = ?", (sid,))
-        tokens_win, context_tokens = _message_totals(messages, since_epoch)
+        # Janela via SQL: carregar TODAS as mensagens de cada sessao (dezenas de
+        # milhares com o tempo) era o maior custo do ciclo — o SQLite filtra por
+        # time_created e so o tail (para o contexto) precisa das ultimas.
+        if since_epoch is None:
+            messages = _rows(db, "SELECT data, time_created, time_updated FROM message "
+                                 "WHERE session_id = ?", (sid,))
+            tokens_win, context_tokens = _message_totals(messages, since_epoch)
+        else:
+            janela = _rows(db, "SELECT data FROM message WHERE session_id = ? "
+                               "AND time_created >= ?",
+                           (sid, int(since_epoch * 1000)))
+            tokens_win, _ = _message_totals(janela, None)
+            tail = _rows(db, "SELECT data FROM message WHERE session_id = ? "
+                             "ORDER BY time_created DESC LIMIT 8", (sid,))
+            # DESC: o contexto vem da ULTIMA resposta — repõe a ordem cronologica.
+            _, context_tokens = _message_totals(list(reversed(tail)), None)
 
         # Estado pelo ULTIMO part da sessao (work/free/ask) — sem expiracao: o
         # ultimo evento E o estado. Fallback por idade so para sessao sem parts.
@@ -204,6 +223,23 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
             state = signal[0]
             state_age = max((now - datetime.fromtimestamp(signal[1], tz=timezone.utc))
                             .total_seconds(), 0.0)
+        # Turno vivo pelo log: se o ultimo ciclo do loop (loop/stream/process)
+        # e MAIS NOVO que a ultima part gravada, o turno segue em execucao —
+        # mesmo com segmentos longos sem escrita no SQLite (reasoning/texto).
+        # Turno vivo: o ultimo ciclo do loop no log (loop/stream/process) e mais
+        # NOVO que o ultimo `step-finish` gravado. O SQLite so escreve a part
+        # quando o segmento TERMINA, entao os buracos silenciosos do turno
+        # (reasoning/texto longos) nao produzem nada — o heartbeat cobre. Um
+        # step-finish posterior ao heartbeat encerra o turno de verdade.
+        turn_ts = turn_activity.get(sid)
+        # ask/perm tem dono proprio (com expiracao); o heartbeat so vence o
+        # fallback por idade e o sinal de part (work/free).
+        if (turn_ts is not None
+                and (now.timestamp() - turn_ts) <= WORK_MAX_AGE_S
+                and turn_ts > turn_ends.get(sid, 0.0)
+                and state in ("work", "free")):
+            state = "work"
+            state_age = int(max(now.timestamp() - turn_ts, 0.0))
         window = context_window_for(model_id, provider_db, ctx_window)
         ctx_quality = "measured" if ctx_window > 0 else "estimated"
         ctx_pct = (min(100, int(context_tokens * 100 / window))
@@ -213,6 +249,7 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
             "id": sid,
             "project": _project_name(session, branch),
             "full": _project_name(session, branch),
+            "_project_raw": _project_raw_name(session),
             "branch": branch,
             "model": short_model(model_id),
             "provider": provider_of(model_id, provider_db),
@@ -246,28 +283,29 @@ def window_tokens(database: Path | None, since_epoch: float | None = None) -> in
     return total
 
 
-def session_structured_states(database: Path | None, since: datetime) -> dict[str, tuple[str, float]]:
-    """Sinais estruturados de estado por sessao, do ULTIMO tool part de cada uma.
-
-    A pergunta ao usuario deixa a tool `question` em "running" ate ser respondida
-    (estado `ask`). O pedido de PERMISSAO do OpenCode nao e persistido no SQLite
-    (tabela permission vazia e "pending" e estado de pipeline), entao `perm` nao e
-    detectavel por esta fonte. Devolve {session_id: (estado, epoch_s)}."""
-    # Partes sao ATUALIZADAS IN-PLACE (mesmo id: pending -> running -> completed).
-    # O estado real da sessao vem da parte com o maior time_updated — nunca de um
-    # pending antigo que sobreviveu no historico (falso "perm" medido em 31/08).
-    # Estado do ULTIMO part de cada sessao (por time_updated — as partes sao
-    # atualizadas in-place). Turno em execucao = work; turno encerrado = free.
-    rows = _rows(database if database is not None else db_path(),
+def _part_rows(database: Path | None, since: datetime) -> list[dict]:
+    return _rows(database if database is not None else db_path(),
                  "SELECT session_id, data, time_updated FROM part "
                  "WHERE time_updated >= ? ORDER BY time_updated ASC",
                  (int(since.timestamp() * 1000),))
+
+
+def _part_states_from_rows(rows: list[dict]) -> tuple[dict, dict]:
+    """(sinais de estado, fins de turno) — UMA varredura alimenta os dois.
+
+    O scan do OpenCode precisava de DUAS passadas pela tabela part (sinais e
+    step-finish), cada uma relendo os mesmos blobs de ~4s frio. Mesma funcao,
+    mesmo dado, metade do custo."""
     latest: dict[str, tuple[str, float]] = {}
+    ends: dict[str, float] = {}
     for row in rows:
         try:
             part = json.loads(row["data"])
         except (json.JSONDecodeError, TypeError):
             continue
+        ts = (row["time_updated"] or 0) / 1000.0
+        if part.get("type") == "step-finish":
+            ends[row["session_id"]] = max(ends.get(row["session_id"], 0.0), ts)
         ptype = part.get("type") or ""
         state = ((part.get("state") or {}).get("status") or "")
         tool = part.get("tool") or ""
@@ -290,8 +328,34 @@ def session_structured_states(database: Path | None, since: datetime) -> dict[st
             signal = "free"                      # ultima tool fechou o turno
         if signal:
             # O ULTIMO part vence SEMPRE — um evento posterior invalida o anterior.
-            latest[row["session_id"]] = (signal, (row["time_updated"] or 0) / 1000.0)
-    return latest
+            latest[row["session_id"]] = (signal, ts)
+    return latest, ends
+
+
+def session_structured_states(database: Path | None, since: datetime) -> dict[str, tuple[str, float]]:
+    """Sinais estruturados de estado por sessao, do ULTIMO tool part de cada uma.
+
+    A pergunta ao usuario deixa a tool `question` em "running" ate ser respondida
+    (estado `ask`). O pedido de PERMISSAO do OpenCode nao e persistido no SQLite
+    (tabela permission vazia e "pending" e estado de pipeline), entao `perm` nao e
+    detectavel por esta fonte. Devolve {session_id: (estado, epoch_s)}."""
+    # Partes sao ATUALIZADAS IN-PLACE (mesmo id: pending -> running -> completed).
+    # O estado real da sessao vem da parte com o maior time_updated — nunca de um
+    # pending antigo que sobreviveu no historico (falso "perm" medido em 31/08).
+    # Estado do ULTIMO part de cada sessao (por time_updated — as partes sao
+    # atualizadas in-place). Turno em execucao = work; turno encerrado = free.
+    signals, _ = _part_states_from_rows(_part_rows(database, since))
+    return signals
+
+
+def turn_end_times(database: Path | None, since: datetime) -> dict[str, float]:
+    """{session_id: epoch_s} do ULTIMO `step-finish` por sessao na janela.
+
+    O step-finish fecha o turno: e ele, e nao o `text` (que tambem existe no
+    MEIO do turno, entre tools), quem marca o fim — comparado com o heartbeat
+    do log decide se o turno segue vivo."""
+    _, ends = _part_states_from_rows(_part_rows(database, since))
+    return ends
 
 
 def _between(line: str, start_marker: str, end_marker: str) -> str | None:
@@ -313,6 +377,54 @@ def _log_ts(line: str) -> float | None:
         return None
 
 
+def _log_tail(path: Path) -> str:
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - LOG_TAIL_BYTES))
+            return f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _session_id_in(line: str) -> str | None:
+    """O session.id da linha, ou None. Vale para as variantes do log
+    (process/loop/stream escrevem o id seguido de campos diferentes)."""
+    marker = "session.id="
+    i = line.find(marker)
+    if i < 0:
+        return None
+    raw = line[i + len(marker):].split()[0] if line[i + len(marker):].strip() else ""
+    return raw or None
+
+
+def turn_activity_from_log(log_path: Path | None) -> dict[str, float]:
+    """{session_id: epoch_s} do ultimo ciclo de turno no log por sessao.
+
+    O SQLite grava a part so QUANDO O SEGMENTO TERMINA: durante um turno ativo
+    a ultima part gravada costuma ser o `text` do turno anterior e o coletor
+    via o card como `free` com a sessao produzindo. O log, ao contrario, pulsa
+    (`message=loop|stream|process session.id=...`) a cada ciclo do loop do
+    agente — o lado E o ultimo sinal de vida conhecido, e mais novo que
+    qualquer part gravada enquanto o turno roda."""
+    path = Path(log_path) if log_path else LOG_PATH
+    if not path.is_file():
+        return {}
+    activity: dict[str, float] = {}
+    for line in _log_tail(path).splitlines():
+        if "session.id=" not in line:
+            continue
+        if not any(m in line for m in (" message=loop ", " message=stream ",
+                                       " message=process ")):
+            continue
+        ts = _log_ts(line)
+        sid = _session_id_in(line)
+        if sid and ts:
+            activity[sid] = max(activity.get(sid, 0.0), ts)
+    return activity
+
+
 def perm_signals_from_log(log_path: Path | None, now: datetime) -> dict[str, float]:
     """{session_id: epoch_s} do ULTIMO pedido de permissao por sessao.
 
@@ -323,13 +435,8 @@ def perm_signals_from_log(log_path: Path | None, now: datetime) -> dict[str, flo
     path = Path(log_path) if log_path else LOG_PATH
     if not path.is_file():
         return {}
-    try:
-        with path.open("rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - LOG_TAIL_BYTES))
-            chunk = f.read().decode("utf-8", errors="replace")
-    except OSError:
+    chunk = _log_tail(path)
+    if not chunk:
         return {}
 
     run_map: dict[str, str] = {}

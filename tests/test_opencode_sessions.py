@@ -395,6 +395,103 @@ class ScanOpenCodeSessionsTests(unittest.TestCase):
                            'pattern="C:/tmp/*" action.perm', encoding="utf-8")
             self.assertEqual({}, opencode_sessions.perm_signals_from_log(log, NOW))
 
+    def test_turn_heartbeat_newer_than_part_means_work(self):
+        """O SQLite grava a part so QUANDO O SEGMENTO TERMINA: com o turno rodando
+        (reasoning/texto longos), a ultima part gravada e o `text` do turno
+        ANTERIOR e o card ficava `free` com a sessao produzindo. O heartbeat do
+        log (loop/stream mais novo que a part) e quem diz que o turno segue."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-turn", NOW - timedelta(hours=1)),
+            ], [])
+            self._write_part(db, "p1", "ses-turn",
+                             {"type": "text", "state": {"status": None}},
+                             NOW - timedelta(seconds=20))
+            log = self._write_log(Path(tmp) / "opencode.log", [
+                "timestamp=2026-08-28T11:59:55.000Z level=INFO run=abc "
+                "message=loop session.id=ses-turn step=20",
+            ])
+            sessions = opencode_sessions.scan_opencode_sessions(
+                NOW, database=db, log_path=log)
+        self.assertEqual("work", sessions[0]["state"])
+
+    def test_stream_heartbeat_also_marks_turn_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-str", NOW - timedelta(hours=1)),
+            ], [])
+            log = self._write_log(Path(tmp) / "opencode.log", [
+                "timestamp=2026-08-28T11:59:58.000Z level=INFO run=abc "
+                "message=stream providerID=opencode-go modelID=glm-5.3-flash "
+                "session.id=ses-str small=false agent=build",
+            ])
+            sessions = opencode_sessions.scan_opencode_sessions(
+                NOW, database=db, log_path=log)
+        self.assertEqual("work", sessions[0]["state"])
+
+    def test_part_newer_than_heartbeat_keeps_free(self):
+        """Turno encerrado: o `step-finish` e mais NOVO que o ultimo loop do
+        log -> free. O `text` no meio do turno nao fecha turno — so o
+        step-finish (comprovado ao vivo: toda mensagem termina com ele)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-done", NOW - timedelta(hours=1)),
+            ], [])
+            self._write_part(db, "p1", "ses-done",
+                             {"type": "text", "state": {"status": None}},
+                             NOW - timedelta(seconds=5))
+            self._write_part(db, "p2", "ses-done",
+                             {"type": "step-finish", "state": {"status": None}},
+                             NOW - timedelta(seconds=2))
+            log = self._write_log(Path(tmp) / "opencode.log", [
+                "timestamp=2026-08-28T11:59:40.000Z level=INFO run=abc "
+                "message=loop session.id=ses-done step=20",
+            ])
+            sessions = opencode_sessions.scan_opencode_sessions(
+                NOW, database=db, log_path=log)
+        self.assertEqual("free", sessions[0]["state"])
+
+    def test_completed_tool_mid_turn_stays_work(self):
+        """Tool completou ha 2s e o turno segue (proximo loop vem depois do
+        gap de thinking): heartbeat > step-finish anterior = work, mesmo com o
+        sinal de part dizendo free."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-mid", NOW - timedelta(hours=1)),
+            ], [])
+            self._write_part(db, "p1", "ses-mid",
+                             {"type": "tool", "tool": "bash",
+                              "state": {"status": "completed"}},
+                             NOW - timedelta(seconds=2))
+            self._write_part(db, "p0", "ses-mid",
+                             {"type": "step-finish", "state": {"status": None}},
+                             NOW - timedelta(seconds=60))
+            log = self._write_log(Path(tmp) / "opencode.log", [
+                "timestamp=2026-08-28T11:59:40.000Z level=INFO run=abc "
+                "message=loop session.id=ses-mid step=20",
+            ])
+            sessions = opencode_sessions.scan_opencode_sessions(
+                NOW, database=db, log_path=log)
+        self.assertEqual("work", sessions[0]["state"])
+
+    def test_heartbeat_does_not_override_ask(self):
+        """ask/perm tem dono proprio: heartbeat nao rouba o estado."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _write_db(Path(tmp) / "opencode.db", [
+                _session("ses-ask3", NOW - timedelta(hours=1)),
+            ], [])
+            self._write_part(db, "p1", "ses-ask3",
+                             {"type": "tool", "tool": "question",
+                              "state": {"status": "running"}},
+                             NOW - timedelta(seconds=60))
+            log = self._write_log(Path(tmp) / "opencode.log", [
+                "timestamp=2026-08-28T11:59:55.000Z level=INFO run=abc "
+                "message=loop session.id=ses-ask3 step=21",
+            ])
+            sessions = opencode_sessions.scan_opencode_sessions(
+                NOW, database=db, log_path=log)
+        self.assertEqual("ask", sessions[0]["state"])
+
     def test_missing_database_returns_empty(self):
         self.assertEqual([], opencode_sessions.scan_opencode_sessions(
             NOW, database=Path("Z:/inexistentes/opencode.db")))

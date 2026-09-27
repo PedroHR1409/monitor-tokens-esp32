@@ -47,6 +47,17 @@ def _write_rollout(directory: Path, name: str,
     return path
 
 
+def _write_detailed_rollout(directory: Path, name: str,
+                            events: list[tuple[datetime, dict]]) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text("\n".join(json.dumps({
+        "timestamp": ts.isoformat(),
+        "payload": {"info": {"total_token_usage": usage}},
+    }) for ts, usage in events) + "\n", encoding="utf-8")
+    return path
+
+
 class PersistenceTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -93,6 +104,26 @@ class PersistenceTests(unittest.TestCase):
         window = usage_history.daily_window(self.db, TZ, now=NOW)
         self.assertEqual(20, sum(window))
 
+    def test_prune_honours_an_explicit_retention_from_config(self):
+        """The daemon passes storage.retention_days; ignoring it made the TOML
+        setting decorative while a hardcoded constant decided the disk."""
+        con = sqlite3.connect(self.db)
+        con.execute(usage_history._SCHEMA)
+        con.execute("INSERT INTO usage_history VALUES ('2026-08-15', 10)")   # 13 dias
+        con.execute("INSERT INTO usage_history VALUES ('2026-08-20', 20)")   # 8 dias
+        con.commit(); con.close()
+        removed = usage_history.prune(self.db, keep_days=10, tz=TZ, now=NOW)
+        self.assertEqual(1, removed)
+        remaining = usage_history.daily_window(self.db, TZ, now=NOW)
+        self.assertEqual(20, sum(remaining))
+
+    def test_default_retention_matches_the_config_default(self):
+        """A default divergent from StorageSettings.retention_days is the config/code
+        disconnection this feature closed: 35 here against 30 in monitor.toml."""
+        from monitor_config import StorageSettings
+
+        self.assertEqual(StorageSettings().retention_days, usage_history.RETENTION_DAYS)
+
     def test_backfill_inserts_only_days_without_live_row(self):
         today = usage_history.local_today(TZ, NOW).isoformat()
         usage_history.record_today(self.db, 555, TZ, NOW)     # linha viva de hoje
@@ -105,6 +136,22 @@ class PersistenceTests(unittest.TestCase):
         window = usage_history.daily_window(self.db, TZ, now=NOW)
         self.assertEqual(700, window[28])            # ontem reconstruido
         self.assertEqual(555, window[29])            # hoje NAO foi sobrescrito pelo 999
+
+    def test_forced_backfill_repairs_existing_day(self):
+        projects = Path(self._tmp.name) / "projects"
+        yesterday = NOW - timedelta(days=1)
+        _write_transcript(projects / "p", "s.jsonl", [(yesterday, 700)])
+        usage_history.record_today(self.db, 100, TZ, yesterday)
+        usage_history.backfill(self.db, claude_dir=projects, rollouts_dir=None,
+                               opencode_db=None, tz=TZ, now=NOW,
+                               replace_existing=True)
+        con = sqlite3.connect(self.db)
+        try:
+            value = con.execute("SELECT tokens FROM usage_history WHERE day = ?",
+                                (yesterday.date().isoformat(),)).fetchone()[0]
+        finally:
+            con.close()
+        self.assertEqual(700, value)
 
     def test_backfill_deduplicates_message_ids_across_days(self):
         projects = Path(self._tmp.name) / "projects"
@@ -125,6 +172,25 @@ class PersistenceTests(unittest.TestCase):
 
 
 class CodexBackfillTests(unittest.TestCase):
+    def test_codex_excludes_cached_input_from_consumption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rollouts = Path(tmp) / "codex"
+            day = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+            _write_detailed_rollout(rollouts, "rollout-detailed.jsonl", [
+                (day, {"input_tokens": 1000, "cached_input_tokens": 900,
+                       "output_tokens": 50, "reasoning_output_tokens": 25,
+                       "cache_write_input_tokens": 10, "total_tokens": 1050}),
+                (day + timedelta(hours=1),
+                 {"input_tokens": 1600, "cached_input_tokens": 1400,
+                  "output_tokens": 80, "reasoning_output_tokens": 40,
+                  "cache_write_input_tokens": 20, "total_tokens": 1680}),
+            ])
+            db = Path(tmp) / "hist.db"
+            usage_history.backfill(db, claude_dir=None, rollouts_dir=rollouts,
+                                   opencode_db=None, tz=TZ, now=NOW)
+            window = usage_history.daily_window(db, TZ, now=NOW)
+            self.assertEqual(340, window[28])
+
     def test_codex_daily_buckets_follow_cumulative_diff(self):
         with tempfile.TemporaryDirectory() as tmp:
             rollouts = Path(tmp) / "codex"
@@ -170,6 +236,29 @@ class PayloadIntegrationTests(unittest.TestCase):
             payload_sem = session_daemon.build_payload_v1(
                 root / "claude", root / "missing-index", 6, TZ, now=NOW)
             self.assertNotIn("history", payload_sem["stats"])
+
+    def test_force_backfill_fills_days_the_daemon_was_off(self):
+        """Com o backfill limitado ao boot vazio, todo dia sem daemon virava 0
+        para sempre (medido: 12–14/09/2026 sumiram do heatmap). `force_backfill`
+        (boot do daemon e virada do dia local) repovoa sem tocar linhas vivas."""
+        import session_daemon
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "hist.db"
+            projects = root / "claude" / "proj"
+            _write_transcript(projects, "ontem.jsonl",
+                              [(NOW - timedelta(days=1), 7000)])
+            # Estado anterior ao fix: linha viva de hoje, dia parado sem linha.
+            usage_history.record_today(db, 100, TZ, NOW)
+            payload = session_daemon.build_payload_v1(
+                root / "claude", root / "missing-index", 6, TZ, now=NOW,
+                history_db=db, codex_rollouts_dir=root / "rollouts")
+            self.assertEqual(0, payload["stats"]["history"]["daily"][28])  # ontem = 0
+            payload = session_daemon.build_payload_v1(
+                root / "claude", root / "missing-index", 6, TZ, now=NOW,
+                history_db=db, force_backfill=True,
+                codex_rollouts_dir=root / "rollouts")
+            self.assertEqual(7000, payload["stats"]["history"]["daily"][28])
 
     def test_v2_projects_history_block(self):
         import session_daemon

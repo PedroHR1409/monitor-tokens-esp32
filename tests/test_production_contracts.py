@@ -27,6 +27,37 @@ class ProductionContractsTests(unittest.TestCase):
         self.assertNotIn(secret, result.stdout + result.stderr)
         self.assertIn("leak.txt", result.stdout + result.stderr)
 
+    def test_secret_scanner_ignores_a_broadcast_ssid(self):
+        """Um SSID e publico (vai em beacon em claro); trata-lo como segredo acusava
+        falso vazamento quando o nome da rede coincidia com o sobrenome do autor."""
+        scanner = ROOT / "tools" / "check_secrets.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "include").mkdir()
+            (repo / "include" / "secrets.h").write_text(
+                '#define WIFI_SSID "broadcast-test-network"\n'
+                '#define WIFI_PASSWORD "private-test-value-8391"\n', encoding="utf-8")
+            (repo / "shared.md").write_text("broadcast-test-network", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(scanner), "--root", str(repo)],
+                text=True, capture_output=True, check=False)
+        self.assertEqual(0, result.returncode)
+
+    def test_secret_scanner_still_flags_a_password_even_after_dropping_ssid(self):
+        scanner = ROOT / "tools" / "check_secrets.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "include").mkdir()
+            secret = "private-test-value-8391"
+            (repo / "include" / "secrets.h").write_text(
+                '#define WIFI_PASSWORD_2 "{}"\n'.format(secret), encoding="utf-8")
+            (repo / "shared.md").write_text(secret, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(scanner), "--root", str(repo)],
+                text=True, capture_output=True, check=False)
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn(secret, result.stdout + result.stderr)
+
     def test_versionable_secrets_example_exists(self):
         example = ROOT / "include" / "secrets.example.h"
         self.assertTrue(example.is_file())
@@ -34,6 +65,14 @@ class ProductionContractsTests(unittest.TestCase):
         self.assertIn("WIFI_SSID", text)
         self.assertIn("WIFI_PASSWORD", text)
         self.assertIn("MONITOR_API_TOKEN", text)
+
+    def test_secrets_example_declares_a_second_network(self):
+        """O exemplo versionado e o contrato de formato das duas redes; sem as chaves
+        _2, quem clona nao descobre que a alternancia existe."""
+        example = ROOT / "include" / "secrets.example.h"
+        text = example.read_text(encoding="utf-8") if example.is_file() else ""
+        self.assertIn("WIFI_SSID_2", text)
+        self.assertIn("WIFI_PASSWORD_2", text)
 
     def test_default_build_does_not_enable_demo_data(self):
         config = (ROOT / "include" / "config.h").read_text(encoding="utf-8")
@@ -60,7 +99,7 @@ class ProductionContractsTests(unittest.TestCase):
     def test_usage_widget_has_title_arrow_and_no_card_longpress(self):
         ui = (ROOT / "src" / "ui" / "ui_dashboard.cpp").read_text(encoding="utf-8")
         self.assertIn("CONSUMO DE TOKENS (EM MM)", ui)          # unidade no titulo
-        self.assertIn("COL_X[3] = {22, 102, 182}", ui)          # podio 2|1|3
+        self.assertIn("COL_X[USAGE_PROVIDERS] = {8, 82, 156, 230}", ui)  # podio 4 colunas
         self.assertIn("usage_arrow_cb", ui)                     # seta = unica via ao podio
         # long-press no card foi removido (podio agora e so pela seta)
         self.assertNotIn("usage_widget_toggle_cb, LV_EVENT_LONG_PRESSED", ui)

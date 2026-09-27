@@ -11,7 +11,10 @@ import urllib.error
 import urllib.request
 from typing import Any, Mapping
 
+from commandcode_sessions import projects_dir as commandcode_default_path
+from codex_paths import CODEX_SESSION_INDEX
 from monitor_config import MonitorConfig, config_path
+from notify import available as notify_available
 from opencode_sessions import db_path as opencode_default_db
 from session_hook import hook_health
 
@@ -101,8 +104,9 @@ def check_paths(fixture: Mapping[str, Any]) -> list[CheckResult]:
     supplied = _fixture_mapping(fixture, "paths")
     paths = {
         "claude": Path.home() / ".claude" / "projects",
-        "codex": Path.home() / ".codex" / "session_index.jsonl",
+        "codex": CODEX_SESSION_INDEX,
         "opencode": opencode_default_db(),
+        "commandcode": commandcode_default_path(),
     }
     results = []
     for provider, path in paths.items():
@@ -119,7 +123,7 @@ def check_hooks(fixture: Mapping[str, Any]) -> list[CheckResult]:
     supplied = _fixture_mapping(fixture, "hooks")
     health = supplied or hook_health()
     results = []
-    for provider in ("claude", "codex"):
+    for provider in ("claude", "codex", "commandcode"):
         installed = health.get(provider)
         if installed is True:
             results.append(_result("hooks." + provider, OK, provider + " hook installed"))
@@ -190,13 +194,42 @@ def check_device(config: MonitorConfig, fixture: Mapping[str, Any]) -> CheckResu
 
 
 def check_protocol(fixture: Mapping[str, Any]) -> CheckResult:
+    """O v2 e reserva: o firmware serve apenas o contrato v1 de /sessions.
+
+    O ramo de fixture continua aceitando um device que reporte protocols[]; sem
+    fixture nao ha sonda e o veredito e explicito sobre o estado decidido, nunca
+    um "cannot be verified" que sugere uma medicao que nao existe.
+    """
     supplied = _fixture_mapping(fixture, "device")
     protocols = supplied.get("protocols") if supplied else None
     if isinstance(protocols, list) and 2 in protocols:
         return _result("protocol", OK, "device reports protocol v2 compatibility")
     if isinstance(protocols, list) and 1 in protocols:
         return _result("protocol", WARN, "device reports legacy protocol v1 only")
-    return _result("protocol", WARN, "protocol v2 compatibility cannot be verified")
+    return _result("protocol", WARN,
+                   "protocol v2 is a reserved, non-functional contract; "
+                   "the firmware serves the v1 /sessions endpoint")
+
+
+def check_notify(fixture: Mapping[str, Any]) -> CheckResult:
+    """O canal de toast existe nesta maquina?
+
+    Existe porque o toast falha em SILENCIO: sem PowerShell no PATH (ou sem
+    notify-send no Linux) o alerta critico simplesmente nunca aparece e o operador
+    nao tem como saber. WARN e nao FAIL de proposito — o painel continua sendo o
+    canal principal e o daemon funciona sem o secundario.
+    """
+    supplied = _fixture_mapping(fixture, "notify")
+    if supplied:
+        ready = bool(supplied.get("available"))
+        detail = str(supplied.get("detail") or "")
+    else:
+        ready, detail = notify_available()
+    if ready:
+        return _result("notify", OK, "canal de notificacao disponivel", channel=detail)
+    return _result("notify", WARN,
+                   "canal de notificacao ausente: o toast critico nao vai aparecer",
+                   reason=detail)
 
 
 def run_checks(config: MonitorConfig, fixture: Path | str | None = None,
@@ -213,6 +246,7 @@ def run_checks(config: MonitorConfig, fixture: Path | str | None = None,
         check_storage(config, values),
         check_device(config, values),
         check_protocol(values),
+        check_notify(values),
     ]
 
 

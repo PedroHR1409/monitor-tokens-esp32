@@ -27,19 +27,30 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from session_state import (PERM_MARKER_MAX_AGE_S, conversational_events, infer_state,
+from session_state import (PERM_MARKER_MAX_AGE_S, WORK_MAX_AGE_S,
+                           conversational_events, infer_state,
                            parse_ts, session_display_name, strip_accents)
 from agent_events import MAX_FUTURE_SKEW_S, reduce_session_events
+from codex_paths import CODEX_EVENT_FILE, CODEX_HOME, CODEX_SESSION_INDEX
 from session_hook import hook_health, load_event_store
-from session_meta import CODEX_SESSIONS, codex_meta, read_git_branch, context_usage
+from session_meta import (CODEX_SESSIONS, CODEX_STATE_DB, codex_meta,
+                          codex_threads, read_git_branch, context_usage,
+                          recent_rollouts)
 from usage_tracker import collect as collect_usage, collect_series, session_tokens
 from quota import collect as collect_quota
 from opencode_sessions import (LOG_PATH as OPENCODE_LOG_PATH,
                                count_active_12h as count_opencode_12h,
                                db_path as opencode_default_db,
                                scan_opencode_sessions, window_tokens)
+from commandcode_sessions import (count_active_12h as count_commandcode_12h,
+                                  projects_dir as commandcode_default_dir,
+                                  scan_commandcode_sessions,
+                                  window_tokens as commandcode_window_tokens)
 import usage_history
 import usage_top
+from alert_severity import (Thresholds, severity_for, thresholds_from,
+                            worst_severity)
+from notify import notify
 from protocol_v2 import build_snapshot_v2
 from monitor_config import MonitorConfig
 
@@ -48,10 +59,21 @@ MAX_SESSIONS = 6
 # Ordem de urgencia: o que precisa de voce sobe. Empate resolve por recencia.
 STATE_PRIORITY = {"perm": 0, "ask": 1, "work": 2, "free": 3}
 
+# Ferramentas que TODO firmware conhece. Um POST 422 com um tool fora daqui e sinal de
+# firmware antigo: o daemon reenvia so com a base. Antes o gatilho era "opencode" fixo,
+# o que repetia o problema a cada provedor novo. Ver Decisao 7 do DESIGN.
+BASELINE_TOOLS = frozenset({"claude", "codex"})
+
+# Espelham os defaults de AlertSettings (monitor_config.py). Existem para os
+# testes hermeticos e para build_payload rodar sem um objeto de config em maos;
+# em producao quem manda e sempre o monitor.toml.
+DEFAULT_WARNING_AFTER_S = 90
+DEFAULT_CRITICAL_AFTER_S = 300
+DEFAULT_SNOOZE_MINUTES = 15
+
 DISMISS_FILE = Path(__file__).parent / ".dismissed.json"
 PERM_FILE = Path.home() / ".claude" / "monitor-ai-perm.json"
 CLAUDE_EVENT_FILE = Path.home() / ".claude" / "monitor-ai-events.json"
-CODEX_EVENT_FILE = Path.home() / ".codex" / "monitor-ai-events.json"
 SOURCE_STALE_AFTER_S = 90.0
 
 # Quantos transcripts (mais recentes) inspecionar por ciclo. Ha ~65 sessoes; ler o
@@ -123,6 +145,29 @@ CATALOG_MAX = 9      # quantas linhas cabem na tela do seletor (ver ui_dashboard
 _previous_board_ids: list[str] = []
 
 
+def dedupe_display_names(sessions: list) -> None:
+    """Quando 2+ sessoes VISIVEIS colidem no mesmo texto de card, troca so essas
+    para "projeto/branch" (in-place).
+
+    `session_display_name` mostra so a branch quando ela nao e main/master —
+    identifica melhor UMA sessao, mas nao previa DUAS sessoes do MESMO projeto
+    na MESMA branch ao mesmo tempo: ambas viram o mesmo texto e ficam
+    indistinguiveis entre si. Se a colisao for por projeto (branch main/ausente,
+    "_project_raw" ja igual ao texto atual), nao ha o que ganhar combinando."""
+    counts: dict[str, int] = {}
+    for s in sessions:
+        counts[s["full"]] = counts.get(s["full"], 0) + 1
+    for s in sessions:
+        if counts[s["full"]] < 2:
+            continue
+        raw = s.get("_project_raw") or s["full"]
+        if raw == s["full"]:
+            continue
+        combined = f"{raw}/{s['full']}"[:FULL_NAME_MAX]
+        s["project"] = combined
+        s["full"] = combined
+
+
 def rank_sessions(sessions: list, previous_ids: list[str] | tuple[str, ...]) -> list:
     """Urgencia, recencia e, somente no empate exato, ordem visual anterior."""
     previous = {session_id: index for index, session_id in enumerate(previous_ids)}
@@ -140,6 +185,16 @@ def _structured_snapshot(session_id: str, store: dict, now: datetime):
     raw = store.get(session_id)
     events = [raw] if isinstance(raw, dict) else []
     return reduce_session_events(session_id, events, now, SOURCE_STALE_AFTER_S)
+
+
+def _fresh_activity_age(activity_epoch: float | None, now_epoch: float) -> int | None:
+    """Idade de atividade local recente, rejeitando timestamps muito futuros."""
+    if activity_epoch is None:
+        return None
+    age = now_epoch - float(activity_epoch)
+    if age < -MAX_FUTURE_SKEW_S or age > WORK_MAX_AGE_S:
+        return None
+    return int(max(age, 0.0))
 
 
 def read_tail_json_objects(path: Path, initial_bytes: int = TAIL_BYTES,
@@ -216,6 +271,8 @@ def meta_of(objs: list) -> tuple:
         if o.get("type") == "assistant":
             m = o.get("message")
             if isinstance(m, dict) and m.get("model"):
+                if "synthetic" in str(m["model"]).lower():
+                    continue   # mensagem sintetica (erro/interrupcao), nao e o modelo
                 model = m["model"]
                 break
     return strip_accents(branch)[:20], short_model(model), strip_accents(effort)[:8]
@@ -269,33 +326,63 @@ def scan_claude_sessions(projects_dir: Path, now: datetime,
         session_id = str(convs[-1].get("sessionId") or path.stem)
         snapshot = _structured_snapshot(session_id, event_store, now)
         structured = snapshot.last_event_at is not None
+        conversation_at = parse_ts(convs[-1].get("timestamp"))
+        if (conversation_at is not None
+                and (conversation_at - now).total_seconds() > MAX_FUTURE_SKEW_S):
+            conversation_at = None
+        structured_current = (structured and
+                              (conversation_at is None
+                               or snapshot.last_event_at >= conversation_at))
+        marker_ts = perm_raw.get(session_id)
+        marker_current = (
+            session_id in perm_pending
+            and (conversation_at is None or marker_ts >= conversation_at.timestamp()))
         transcript_state, transcript_age = infer_state(
             objs, now,
-            perm_pending=(structured and snapshot.state == "perm")
-            or session_id in perm_pending)
+            perm_pending=(structured_current and snapshot.state == "perm")
+            or marker_current)
+        if structured_current and snapshot.ended:
+            continue
         if transcript_state == "ask":
             state, age = transcript_state, transcript_age
-        elif structured:
-            if snapshot.ended:
-                continue
+        elif structured_current:
             state = snapshot.state
             age = float(snapshot.age_s or 0)
         else:
             state, age = transcript_state, transcript_age
-        source_stale = snapshot.stale if structured else (
+        # A marca de perm so sustenta `expired` enquanto for a evidencia MAIS RECENTE.
+        # Se um evento estruturado chegou depois dela, a permissao ja foi resolvida e a
+        # marca apenas nao foi limpa — exibir `perm?` ali seria afirmar coisa errada
+        # sobre uma sessao saudavel, que e exatamente o que este projeto evita.
+        marker_age_s = None
+        if isinstance(marker_ts, (int, float)):
+            evidence_at = [at for at in (snapshot.last_event_at, conversation_at)
+                           if at is not None]
+            newer_evidence = (evidence_at
+                              and max(evidence_at).timestamp() > marker_ts)
+            if not newer_evidence:
+                marker_age_s = now_epoch - marker_ts
+
+        source_stale = snapshot.stale if structured_current else (
             age == float("inf") or age > SOURCE_STALE_AFTER_S)
         diagnostic = ",".join(snapshot.diagnostics)
+        if not structured:
+            diagnostic = ",".join(filter(None, (diagnostic, "no_structured_event")))
+        elif not structured_current and conversation_at is not None:
+            diagnostic = ",".join(filter(None, (diagnostic,
+                                                   "transcript_newer_than_event")))
         if parse_ts(convs[-1].get("timestamp")) is None:
             diagnostic = ",".join(filter(None, (diagnostic, "invalid_timestamp")))
         branch, model, effort = meta_of(objs)
-        full = session_display_name(
-            project_name_of(objs, folder, limit=FULL_NAME_MAX), branch)
+        project_raw = project_name_of(objs, folder, limit=FULL_NAME_MAX)
+        full = session_display_name(project_raw, branch)
         tokens_win = session_tokens(path, now - timedelta(seconds=SESSION_TOKEN_WINDOW_S))
         context = context_usage(objs)
         results.append({
             "id": session_id,
             "project": full,
             "full": full,
+            "_project_raw": project_raw,
             "branch": branch,
             "model": model,
             "effort": effort,
@@ -311,15 +398,25 @@ def scan_claude_sessions(projects_dir: Path, now: datetime,
             "source_age_s": None if age == float("inf") else int(age),
             "diagnostic": diagnostic,
             "_age": age,
+            "_structured": structured,
+            "_activity_age_s": (None if age == float("inf") else int(age)),
+            "_perm_marker_age_s": marker_age_s,
         })
     return results
 
 
 def scan_codex_sessions(index_path: Path, now: datetime,
                         token_since: datetime | None = None,
-                        event_path: Path | None = None) -> list:
-    if not index_path.is_file():
-        return []
+                        event_path: Path | None = None,
+                        rollouts_dir: Path | None = None,
+                        state_db: Path | None = None) -> list:
+    """Sessoes do Codex: identidade/recencia vem do indice E dos rollouts.
+
+    `rollouts_dir=None` (tests hermeticos) desliga a varredura de rollouts. Em
+    producao o daemon passa CODEX_SESSIONS: o session_index parou de receber
+    sessoes novas (15/09/2026), entao sem o rollout a sessao nem aparecia — e o
+    mtime do rollout e tambem o unico sinal de vida quando nao ha evento de
+    hook (codex session_hook nunca gravou evento nesta maquina)."""
     latest = {}
     try:
         with index_path.open("r", encoding="utf-8", errors="replace") as f:
@@ -334,7 +431,38 @@ def scan_codex_sessions(index_path: Path, now: datetime,
                 if obj.get("id"):
                     latest[obj["id"]] = obj    # append-only: ultima ocorrencia vence
     except OSError:
-        return []
+        pass    # indice ausente/corrompido: os rollouts recentes ainda valem
+
+    # Sessoes que existem so no disco: rollout recente entra como identidade, e
+    # um id que JA esta no indice ganha a recencia do rollout quando ela for
+    # maior (o indice ficou para tras de versoes novas do Codex).
+    recentes = (recent_rollouts(rollouts_dir, 24 * 3600, now.timestamp())
+                if rollouts_dir is not None else {})
+    for rid, mtime in recentes.items():
+        ts_iso = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+        atual = latest.get(rid)
+        if atual is None:
+            latest[rid] = {"id": rid, "thread_name": "codex", "updated_at": ts_iso}
+        else:
+            idx_ts = parse_ts(atual.get("updated_at"))
+            if idx_ts is None or idx_ts.timestamp() < mtime:
+                atual["updated_at"] = ts_iso
+
+    # O índice append-only não acompanha todas as versões do Codex. A tabela
+    # `threads` é a fonte viva da UI atual e vence índice/rollout quando estiver
+    # mais recente.
+    thread_rows = codex_threads(state_db) if state_db is not None else {}
+    for tid, thread in thread_rows.items():
+        atual = latest.get(tid)
+        if atual is None:
+            latest[tid] = dict(thread)
+            recentes[tid] = thread["updated_epoch"]
+            continue
+        db_ts = parse_ts(thread.get("updated_at"))
+        idx_ts = parse_ts(atual.get("updated_at"))
+        if db_ts is not None and (idx_ts is None or db_ts > idx_ts):
+            atual.update(thread)
+        recentes[tid] = max(recentes.get(tid, 0.0), thread["updated_epoch"])
 
     event_store = load_event_store(event_path or CODEX_EVENT_FILE)
     out = []
@@ -346,27 +474,46 @@ def scan_codex_sessions(index_path: Path, now: datetime,
         age = (now - ts).total_seconds() if ts else float("inf")
         age = max(age, 0.0)
         snapshot = _structured_snapshot(tid, event_store, now)
-        if snapshot.ended:
+        activity_epoch = recentes.get(tid)
+        activity_age = _fresh_activity_age(activity_epoch, now.timestamp())
+        activity_after_event = (
+            activity_age is not None
+            and (snapshot.last_event_at is None
+                 or activity_epoch > snapshot.last_event_at.timestamp() + 2.0))
+        if snapshot.ended and not activity_after_event:
             continue
         state = snapshot.state
         state_age = snapshot.age_s if snapshot.age_s is not None else 0
         diagnostic = ",".join(snapshot.diagnostics)
-        if snapshot.last_event_at is None:
+        if activity_after_event:
+            # Um evento antigo `free`/`ended` nao pode apagar atividade nova. O
+            # Codex atualiza a thread e o rollout durante o turno; os hooks podem
+            # estar ausentes ou ainda sem confianca nesta instalacao.
+            state = "work"
+            state_age = activity_age
+            diagnostic = ("no_structured_event" if snapshot.last_event_at is None
+                          else "activity_after_structured_event")
+        elif snapshot.last_event_at is None:
             diagnostic = "no_structured_event"
+        # A atividade local tambem repara hooks ausentes/atrasados, mas um evento
+        # estruturado mais recente continua sendo a fonte autoritativa.
         # O indice do Codex so tem id/nome/updated_at; modelo, effort, cwd e uso de
         # tokens estao no rollout da sessao, que casa pelo id.
         cx = codex_meta(tid, token_since)
-        branch = strip_accents(read_git_branch(cx["cwd"]))[:20]
-        full = session_display_name(
-            strip_accents(obj.get("thread_name") or "codex")[:FULL_NAME_MAX], branch)
+        thread = thread_rows.get(tid, {})
+        cwd = cx["cwd"] or thread.get("cwd", "")
+        branch = strip_accents(read_git_branch(cwd))[:20]
+        project_raw = strip_accents(obj.get("thread_name") or "codex")[:FULL_NAME_MAX]
+        full = session_display_name(project_raw, branch)
         context = cx["context"]
         out.append({
             "id": tid,
             "project": full,
             "full": full,
-            "branch": strip_accents(read_git_branch(cx["cwd"]))[:20],
-            "model": short_model(cx["model"]),
-            "effort": strip_accents(cx["effort"])[:8],
+            "_project_raw": project_raw,
+            "branch": strip_accents(read_git_branch(cwd))[:20],
+            "model": short_model(cx["model"] or thread.get("model", "")),
+            "effort": strip_accents(cx["effort"] or thread.get("effort", ""))[:8],
             "tokensWin": cx["tokens"],
             "ctxPct": cx["ctx_pct"],
             "context": {"value": context["pct"] if context["quality"] != "unknown" else None,
@@ -375,10 +522,13 @@ def scan_codex_sessions(index_path: Path, now: datetime,
             "tool": "codex",
             "state": state,
             "elapsed": state_age,
-            "source_stale": snapshot.stale,
-            "source_age_s": snapshot.age_s,
+            "source_stale": snapshot.stale and not activity_after_event,
+            "source_age_s": (activity_age if activity_after_event else snapshot.age_s),
             "diagnostic": diagnostic,
             "_age": age,
+            "_structured": snapshot.last_event_at is not None,
+            "_activity_age_s": activity_age,
+            "_perm_marker_age_s": None,
         })
     return out
 
@@ -454,20 +604,88 @@ def fetch_id_list(base_url: str, path: str, key: str, timeout: float = 3.0,
         return set()
 
 
-def hook_warnings(sessions: list, health: dict) -> list:
-    """Avisos para o operador quando um agente esta no board sem hook instalado.
+def fetch_snooze(base_url: str, token: str | None = None, timeout: float = 3.0) -> int:
+    """Segundos restantes de mudo, lidos da placa.
 
-    Nao basta o hook estar ausente: sem sessao daquele agente nao ha nada a avisar. E
-    nao basta a sessao existir: com hook instalado o estado vem por evento e o silencio
-    e informacao legitima. O aviso e a interseccao dos dois, que e exatamente o caso em
-    que o painel exibiria `?` para tudo sem dizer por que.
+    Duracao relativa e nao timestamp: os dois relogios sao independentes e segundos
+    restantes nao tem fuso nem skew (mesmo racional de `elapsed`, SPEC secao 5).
+    Device fora do ar devolve 0 — degrada, nao quebra, igual ao fetch_id_list.
     """
+    try:
+        with urllib.request.urlopen(
+                authenticated_request(base_url + "/snooze", token=token),
+                timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return max(0, int(data.get("snooze_s", 0)))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError, TypeError):
+        return 0
+
+
+# Pares (sessao, estado) que ja receberam toast. Vive no processo de proposito:
+# reiniciar o daemon re-avisa, e isso e correto — quem reiniciou perdeu o contexto
+# tambem. Persistir em disco faria o operador perder o unico aviso de um perm real
+# so porque o daemon foi reiniciado no meio.
+_toasted: set = set()
+
+
+def maybe_toast(sessions: list, snooze_s: int) -> int:
+    """Notifica quem acabou de cruzar `critical`. Uma vez por (sessao, estado).
+
+    Mesmo principio do aviso de hook, que so imprime quando o diagnostico MUDA:
+    repetir treina o operador a ignorar justamente o aviso que importa.
+    """
+    if snooze_s > 0:
+        return 0          # mudo e mudo: cobre inclusive escalada nascida depois
+    disparados, vivos = 0, set()
+    for s in sessions:
+        chave = (s["id"], s["state"])
+        vivos.add(chave)
+        if s.get("severity") != "critical" or chave in _toasted:
+            continue
+        # Marca ANTES de olhar o resultado: canal indisponivel nao pode virar nova
+        # tentativa a cada 5s. Canal quebrado e assunto do `doctor`, nao do loop.
+        _toasted.add(chave)
+        elapsed = int(s.get("elapsed") or 0)
+        if notify("Monitor.AI",
+                  "{} aguarda voce: {} ha {}min".format(
+                      s.get("project") or s["id"][:8], s["state"], max(1, elapsed // 60))):
+            disparados += 1
+    # Par que saiu da lista pode avisar de novo: seria um bloqueio NOVO, nao repeticao.
+    _toasted.intersection_update(vivos)
+    return disparados
+
+
+def hook_warnings(sessions: list, health: dict) -> list:
+    """Avisa quando falta hook ou quando atividade atual nao gerou evento."""
     rotulos = (("claude", "Claude Code", "install_hook.py"),
-               ("codex", "Codex", "install_codex_hook.py"))
-    return ["hook do {} nao instalado e ha sessao dele no board: os estados virao como "
-            "'?'. Rode `python tools/{}` e reinicie as sessoes.".format(nome, script)
-            for tool, nome, script in rotulos
-            if not health.get(tool) and any(s["tool"] == tool for s in sessions)]
+               ("codex", "Codex", "install_codex_hook.py"),
+               ("commandcode", "Command Code", "install_commandcode_hook.py"))
+    warnings = []
+    for tool, nome, script in rotulos:
+        rows = [s for s in sessions if s.get("tool") == tool]
+        if not rows:
+            continue
+        if not health.get(tool):
+            warnings.append(
+                "hook do {} nao instalado e ha sessao dele no board. Rode "
+                "`python tools/{}` e reinicie as sessoes.".format(nome, script))
+            continue
+        active_without_event = any(
+            s.get("state") in {"work", "ask", "perm"}
+            and int(s.get("elapsed") or 0) <= WORK_MAX_AGE_S
+            and any(tag in str(s.get("diagnostic") or "") for tag in (
+                "no_structured_event", "activity_after_structured_event",
+                "transcript_newer_than_event"))
+            for s in rows)
+        if active_without_event:
+            if tool == "codex":
+                detail = "Revise e confie a definicao em `/hooks`, depois reinicie a sessao."
+            else:
+                detail = "Confira se outro programa substituiu o hook e reinstale-o."
+            warnings.append(
+                "ha atividade recente do {} sem evento atual do hook; o daemon "
+                "recuperou o estado do historico local. {}".format(nome, detail))
+    return warnings
 
 
 def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
@@ -476,7 +694,15 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
                      opencode_db: Path | None = None,
                      opencode_ctx_window: int = 0,
                      history_db: Path | None = None,
-                     opencode_log_path: Path | None = None) -> dict:
+                     opencode_log_path: Path | None = None,
+                     thresholds: Thresholds | None = None,
+                     snooze_minutes: int = DEFAULT_SNOOZE_MINUTES,
+                     force_backfill: bool = False,
+                     codex_rollouts_dir: Path | None = None,
+                     codex_state_db: Path | None = None,
+                     commandcode_dir: Path | None = None,
+                     commandcode_ctx_window: int = 0,
+                     retention_days: int = usage_history.RETENTION_DAYS) -> dict:
     """Payload legÃ­vel pelo firmware v1 durante a migraÃ§Ã£o do protocolo.
 
     `opencode_db=None` desliga a coleta do OpenCode (tests hermeticos); o daemon
@@ -490,11 +716,16 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
 
     token_since = now - timedelta(seconds=SESSION_TOKEN_WINDOW_S)
     todas = (scan_claude_sessions(claude_dir, now)
-             + scan_codex_sessions(codex_index, now, token_since))
+             + scan_codex_sessions(codex_index, now, token_since,
+                                   rollouts_dir=codex_rollouts_dir,
+                                   state_db=codex_state_db))
     if opencode_db is not None:
         todas += scan_opencode_sessions(now, token_since, database=opencode_db,
                                         ctx_window=opencode_ctx_window,
                                         log_path=opencode_log_path)
+    if commandcode_dir is not None:
+        todas += scan_commandcode_sessions(now, token_since, directory=commandcode_dir,
+                                           ctx_window=commandcode_ctx_window)
     todas = filter_dismissed(todas, dismissed)
     visiveis = [s for s in todas if s["id"] not in hidden]
 
@@ -511,54 +742,99 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
 
     total = len(sessions)
     top = sessions[:max_sessions]
+    dedupe_display_names(top)
     _previous_board_ids = [s["id"] for s in top]
     no_board = {s["id"] for s in top}
+    # Severidade calculada aqui, e nao dentro de cada coletor: a regra e uma so para os
+    # tres agentes, e um coletor novo nao pode esquecer de aplica-la. Campo aditivo do
+    # protocolo — firmware antigo ignora (validado em session_transport.cpp).
+    limiares = thresholds or Thresholds(warning_after_s=DEFAULT_WARNING_AFTER_S,
+                                        critical_after_s=DEFAULT_CRITICAL_AFTER_S)
+    for s in top:
+        # `elapsed` e o mesmo numero que o card exibe como tempo no estado: a escalada
+        # tem que casar com o que o operador ve, nao com uma segunda medida de idade.
+        s["severity"] = severity_for(
+            s["state"], s.get("elapsed") or 0,
+            structured=bool(s.get("_structured")),
+            perm_marker_age_s=s.get("_perm_marker_age_s"),
+            thresholds=limiares)
     for s in top:
         s.pop("_age", None)
+        s.pop("_structured", None)
+        s.pop("_activity_age_s", None)
+        s.pop("_perm_marker_age_s", None)
+        s.pop("_project_raw", None)
 
     # Catalogo do seletor: tudo que existe e nao esta no board, inclusive o que foi
     # escondido por engano — e justamente assim que se traz um card de volta.
     catalogo = [s for s in todas if s["id"] not in no_board]
     catalogo.sort(key=lambda s: s["_age"])
+    catalogo = catalogo[:CATALOG_MAX]
+    dedupe_display_names(catalogo)
     catalogo = [{"id": s["id"], "name": s["full"][:25],
                  "provider": s.get("provider", ""), "tool": s["tool"], "state": s["state"]}
-                for s in catalogo[:CATALOG_MAX]]
+                for s in catalogo]
 
     usage = collect_usage(claude_dir, tz, now)
+    active_12h = count_active_12h(claude_dir, codex_index, now)
+    if opencode_db is not None:
+        active_12h += count_opencode_12h(opencode_db, now, ACTIVE_WINDOW_S)
+    if commandcode_dir is not None:
+        active_12h += count_commandcode_12h(commandcode_dir, now, ACTIVE_WINDOW_S)
     stats = {
         "tokens_today": usage["tokens_today"],
         "spark": usage["spark"],
         "spark_end_hour": usage["spark_end_hour"],
-        "active_12h": (count_active_12h(claude_dir, codex_index, now)
-                       + (count_opencode_12h(opencode_db, now, ACTIVE_WINDOW_S)
-                          if opencode_db is not None else 0)),
+        "active_12h": active_12h,
         "token_window_h": SESSION_TOKEN_WINDOW_H,
         "total_sessions": total,
-        "quota": collect_quota(claude_dir, now, opencode_db=opencode_db),
+        "quota": collect_quota(claude_dir, now, opencode_db=opencode_db,
+                               commandcode_dir=commandcode_dir),
     }
     if history_db is not None:
         stats["history"] = _record_daily_history(history_db, claude_dir, tz, now,
                                                  usage["tokens_today"],
-                                                 opencode_db=opencode_db)
+                                                 opencode_db=opencode_db,
+                                                 force_backfill=force_backfill,
+                                                 rollouts_dir=codex_rollouts_dir,
+                                                 commandcode_dir=commandcode_dir,
+                                                 retention_days=retention_days)
+        # ttl_s=None: caminho de producao do cache POR PERIODO (d1/d7/d30 com TTLs
+        # proprios). Sem isto cai no caminho legado (um TTL para os tres periodos),
+        # que reprocessa o d30 inteiro a cada 60s — medido em 42s com o volume atual
+        # de sessoes, o suficiente para o ciclo do daemon (5s) atrasar dezenas de
+        # segundos e o painel parecer "stale".
         stats["usage"] = {"top": usage_top.build_cached(
-            claude_dir, codex_index, opencode_db, tz, now)}
+            claude_dir, codex_index, opencode_db, tz, now, ttl_s=None,
+            codex_rollouts_dir=codex_rollouts_dir,
+            commandcode_dir=commandcode_dir)}
     return {
         "generated_at": now.isoformat(),
         "generated_at_epoch": int(now.timestamp()),
         "sessions": top,
         "catalog": catalogo,
         "stats": stats,
+        # A placa arma o mudo no toque, mas a duracao e do operador (monitor.toml).
+        # Mandar aqui evita um valor compilado no firmware discordando da config.
+        "snooze_minutes": snooze_minutes,
     }
 
 
 def _record_daily_history(history_db: Path, claude_dir: Path, tz: timezone,
                           now: datetime, claude_today: int, *,
-                          opencode_db: Path | None) -> dict:
+                          opencode_db: Path | None,
+                          force_backfill: bool = False,
+                          rollouts_dir: Path | None = None,
+                          commandcode_dir: Path | None = None,
+                          retention_days: int = usage_history.RETENTION_DAYS) -> dict:
     """Persiste o total do dia (3 fontes) e devolve o bloco stats.history.
 
     Codex entra pelo mesmo diff acumulado do codex_series (total = janela do dia
     local); OpenCode pelo window_tokens desde a meia-noite local. Backfill roda
-    so quando a tabela esta vazia (primeiro boot), INSERT OR IGNORE."""
+    quando a tabela esta vazia (primeiro boot) E quando `force_backfill` — o
+    INSERT OR IGNORE protege as linhas vivas, entao re-rodar so preenche dias que
+    o daemon ficou desligado: com o backfill limitado ao boot vazio, qualquer dia
+    sem daemon virava 0 para sempre (medido: 12–14/09/2026 sumiram do heatmap)."""
     from usage_tracker import codex_series
 
     codex = codex_series(CODEX_SESSIONS, tz, now)
@@ -566,16 +842,20 @@ def _record_daily_history(history_db: Path, claude_dir: Path, tz: timezone,
     day_start = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
     opencode_today = (window_tokens(opencode_db, day_start.timestamp())
                       if opencode_db is not None else 0)
-    total_today = claude_today + codex_today + opencode_today
+    commandcode_today = (commandcode_window_tokens(commandcode_dir, day_start.timestamp())
+                         if commandcode_dir is not None else 0)
+    total_today = claude_today + codex_today + opencode_today + commandcode_today
 
-    if usage_history.is_empty(history_db):
+    if force_backfill or usage_history.is_empty(history_db):
         gravados = usage_history.backfill(
-            history_db, claude_dir=claude_dir, rollouts_dir=CODEX_SESSIONS,
-            opencode_db=opencode_db, tz=tz, now=now)
+            history_db, claude_dir=claude_dir, rollouts_dir=rollouts_dir,
+            opencode_db=opencode_db, tz=tz, now=now,
+            commandcode_dir=commandcode_dir,
+            replace_existing=force_backfill)
         print(f"[daemon] backfill do historico: {len(gravados)} dias "
               f"({sum(gravados.values()):,} tokens)", file=sys.stderr)
     usage_history.record_today(history_db, total_today, tz, now)
-    usage_history.prune(history_db, tz=tz, now=now)
+    usage_history.prune(history_db, keep_days=retention_days, tz=tz, now=now)
     return {"daily": usage_history.daily_window(history_db, tz, now=now)}
 
 
@@ -590,13 +870,28 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
                      pinned: set | None = None, opencode_db: Path | None = None,
                      opencode_ctx_window: int = 0,
                      history_db: Path | None = None,
-                     opencode_log_path: Path | None = None) -> dict:
+                     opencode_log_path: Path | None = None,
+                     thresholds: Thresholds | None = None,
+                     snooze_minutes: int = DEFAULT_SNOOZE_MINUTES,
+                     force_backfill: bool = False,
+                     codex_rollouts_dir: Path | None = None,
+                     codex_state_db: Path | None = None,
+                     commandcode_dir: Path | None = None,
+                     commandcode_ctx_window: int = 0,
+                     retention_days: int = usage_history.RETENTION_DAYS) -> dict:
     """Projeta os dados normalizados atuais no envelope estÃ¡vel do protocolo v2."""
     generated = now or datetime.now(timezone.utc)
     v1 = build_payload_v1(claude_dir, codex_index, max_sessions, tz, generated,
                           hidden=hidden, pinned=pinned, opencode_db=opencode_db,
                           opencode_ctx_window=opencode_ctx_window,
-                          history_db=history_db, opencode_log_path=opencode_log_path)
+                          history_db=history_db, opencode_log_path=opencode_log_path,
+                          thresholds=thresholds, snooze_minutes=snooze_minutes,
+                          force_backfill=force_backfill,
+                          codex_rollouts_dir=codex_rollouts_dir,
+                          codex_state_db=codex_state_db,
+                          commandcode_dir=commandcode_dir,
+                          commandcode_ctx_window=commandcode_ctx_window,
+                          retention_days=retention_days)
     legacy_stats = v1["stats"]
     series = collect_series(claude_dir, CODEX_SESSIONS, tz, generated)
     usage = {"series": [{"provider": item.provider, "buckets": dict(item.buckets),
@@ -640,7 +935,8 @@ def post_sessions(url: str, payload: dict, timeout: float = 5.0,
 def format_summary(payload: dict) -> str:
     parts = []
     for s in payload["sessions"]:
-        tag = {"claude": "CL", "codex": "CX", "opencode": "OC"}.get(s["tool"], "??")
+        tag = {"claude": "CL", "codex": "CX", "opencode": "OC",
+               "commandcode": "CC"}.get(s["tool"], "??")
         parts.append("{}[{}:{}]".format(s["project"], tag, s["state"]))
     return ", ".join(parts) or "(nenhuma sessao)"
 
@@ -655,15 +951,44 @@ def usage_total_for_log(usage: dict) -> int:
     return sum(int(item.get("total") or 0) for item in series if isinstance(item, dict))
 
 
+def refresh_transport_timestamp(payload: dict, *, previous_epoch: int = 0,
+                                now: datetime | None = None) -> int:
+    """Refresh the envelope timestamp after collection has finished.
+
+    Collectors can take longer than the firmware freshness window (especially on
+    a first history backfill).  The timestamp describes when the snapshot is
+    ready for transport, not when the filesystem scan started.  Keep the v1
+    seconds field and v2 milliseconds field monotonic within one daemon process.
+    """
+    current = now or datetime.now(timezone.utc)
+    if "generated_at_epoch" in payload:
+        epoch = max(int(current.timestamp()), int(previous_epoch) + 1)
+        payload["generated_at_epoch"] = epoch
+        payload["generated_at"] = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+        return epoch
+    if "generated_at_epoch_ms" in payload:
+        epoch_ms = max(int(current.timestamp() * 1000), int(previous_epoch) + 1)
+        payload["generated_at_epoch_ms"] = epoch_ms
+        return epoch_ms
+    return int(previous_epoch)
+
+
 def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Add daemon flags to either the legacy parser or the unified CLI."""
     ap.add_argument("--host", default=None)
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--interval", type=float, default=None)
     ap.add_argument("--claude-dir", default=str(Path.home() / ".claude" / "projects"))
-    ap.add_argument("--codex-index", default=str(Path.home() / ".codex" / "session_index.jsonl"))
+    ap.add_argument("--codex-index", default=str(CODEX_SESSION_INDEX))
+    ap.add_argument("--codex-rollouts", default=str(CODEX_SESSIONS),
+                    help="diretorio dos rollouts do Codex (padrao: $CODEX_HOME/sessions)")
+    ap.add_argument("--codex-state-db", default=str(CODEX_STATE_DB),
+                    help="SQLite de estado do Codex (padrao: $CODEX_HOME/state_5.sqlite)")
     ap.add_argument("--opencode-db", default=None,
                     help="caminho do opencode.db (padrao: ~/.local/share/opencode/opencode.db)")
+    ap.add_argument("--commandcode-projects", default=None,
+                    help="diretorio dos transcripts do Command Code "
+                         "(padrao: ~/.commandcode/projects)")
     ap.add_argument("--max-sessions", type=int, default=MAX_SESSIONS)
     ap.add_argument("--tz-offset", type=float, default=-3.0,
                     help="fuso para o corte do dia (padrao -3 = horario de Brasilia)")
@@ -698,6 +1023,7 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
 
     print("[daemon] Monitor.AI -> {} a cada {}s (dia em UTC{:+g}, board = ultimas {:.0f}h)"
           .format(url, interval, args.tz_offset, BOARD_WINDOW_S / 3600))
+    print("[daemon] CODEX_HOME={}".format(CODEX_HOME))
 
     # Guarda de instancia unica: dois daemons postando no mesmo segundo geram o
     # mesmo generated_at_epoch e o anti-replay da placa derruba um deles com 409.
@@ -717,9 +1043,27 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
     # ferramenta pode reescreve-los com o daemon ja rodando — foi assim que aconteceu.
     avisos_anteriores: list = []
 
+    # CLI sempre tem o attr (argparse); SimpleNamespace de testes nao tem ->
+    # None, para a varredura de rollouts nao vazar disco real nos testes.
+    codex_rollouts_dir = (Path(args.codex_rollouts)
+                          if getattr(args, "codex_rollouts", None) else None)
+    codex_state_db = (Path(args.codex_state_db)
+                      if getattr(args, "codex_state_db", None) else None)
+
+    limiares = thresholds_from(config.alerts)
+    snooze_minutes = config.alerts.snooze_minutes
+    severidade_anterior = None
+    last_transport_epoch = 0
+    # Backfill do historico no boot e a cada virada do dia local: INSERT OR
+    # IGNORE protege as linhas vivas, e o dia local (e nao o UTC) decide quando
+    # repovoar — dias com o daemon desligado entram na proxima rodada. None =
+    # primeiro ciclo forca o backfill (boot).
+    ultimo_dia_backfill = None
+
     while True:
         hidden = fetch_id_list(base, "/hidden", "hidden", token=transport_token)
         pinned = fetch_id_list(base, "/pinned", "pinned", token=transport_token)
+        snooze_s = fetch_snooze(base, token=transport_token)
         # CLI sempre tem o attr (argparse); SimpleNamespace de testes nao tem ->
         # fica None para nao vazar o banco real do operador nos testes.
         if hasattr(args, "opencode_db"):
@@ -728,15 +1072,36 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
         else:
             opencode_db = None
         ctx_window = config.usage.opencode_context_window
+        # CLI sempre tem o attr; SimpleNamespace de testes nao tem -> None, para nao
+        # vazar o diretorio real do operador nos testes.
+        if hasattr(args, "commandcode_projects"):
+            commandcode_dir = (Path(args.commandcode_projects)
+                               if args.commandcode_projects
+                               else commandcode_default_dir())
+        else:
+            commandcode_dir = None
+        commandcode_ctx = config.usage.commandcode_context_window
         history_db = Path(config.storage.database_path)
         opencode_log_path = OPENCODE_LOG_PATH
+        dia_backfill = usage_history.local_today(tz)
+        force_backfill = (ultimo_dia_backfill is None
+                          or dia_backfill != ultimo_dia_backfill)
+        ultimo_dia_backfill = dia_backfill
         if args.protocol == 1:
             payload = build_payload_v1(claude_dir, codex_index, args.max_sessions, tz,
                                        hidden=hidden, pinned=pinned,
                                        opencode_db=Path(opencode_db) if opencode_db else None,
                                        opencode_ctx_window=ctx_window,
                                        history_db=history_db,
-                                       opencode_log_path=opencode_log_path)
+                                       opencode_log_path=opencode_log_path,
+                                       thresholds=limiares,
+                                       snooze_minutes=snooze_minutes,
+                                       force_backfill=force_backfill,
+                                       codex_rollouts_dir=codex_rollouts_dir,
+                                       codex_state_db=codex_state_db,
+                                       commandcode_dir=commandcode_dir,
+                                       commandcode_ctx_window=commandcode_ctx,
+                                       retention_days=config.storage.retention_days)
             st = payload["stats"]
         else:
             sequence += 1
@@ -746,33 +1111,50 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                 sequence=sequence, hidden=hidden, pinned=pinned,
                 opencode_db=Path(opencode_db) if opencode_db else None,
                 opencode_ctx_window=ctx_window, history_db=history_db,
-                opencode_log_path=opencode_log_path)
+                opencode_log_path=opencode_log_path, thresholds=limiares,
+                snooze_minutes=snooze_minutes, force_backfill=force_backfill,
+                codex_rollouts_dir=codex_rollouts_dir,
+                codex_state_db=codex_state_db,
+                commandcode_dir=commandcode_dir,
+                commandcode_ctx_window=commandcode_ctx,
+                retention_days=config.storage.retention_days)
             st = payload["stats"]["usage"]
+        last_transport_epoch = refresh_transport_timestamp(
+            payload, previous_epoch=last_transport_epoch)
         today_tokens = usage_total_for_log(st)
         status = post_sessions(url, payload, timeout=config.transport.timeout_s,
                                token=transport_token)
-        if status == 422 and any(s.get("tool") == "opencode"
+        if status == 422 and any(s.get("tool") not in BASELINE_TOOLS
                                  for s in payload.get("sessions", [])):
-            # Firmware sem suporte a "opencode" rejeita o POST inteiro (422) — melhor
-            # degradar para Claude/Codex do que derrubar o painel. Avisa uma vez so:
-            # repetir a cada ciclo vira ruido (mesma regra dos avisos de hook).
-            # Timeout/erro de rede NAO cai aqui (status 0): reenviar sem OpenCode
-            # nesse caso atrasaria o ciclo e imprimiria um aviso falso.
-            if not getattr(run, "_opencode_fallback_warned", False):
-                print("[daemon] AVISO: firmware nao aceita sessoes OpenCode (422); "
-                      "reenviando sem elas. Compile e grave o firmware novo "
-                      "(pio run -t upload) para exibir OpenCode com icone por modelo.",
+            # Firmware antigo rejeita o POST inteiro (422) quando recebe um tool que nao
+            # conhece — melhor degradar para Claude/Codex do que derrubar o painel. Avisa
+            # uma vez so: repetir a cada ciclo vira ruido (mesma regra dos avisos de hook).
+            # Timeout/erro de rede NAO cai aqui (status 0): reenviar nesse caso atrasaria o
+            # ciclo e imprimiria um aviso falso.
+            if not getattr(run, "_unknown_tool_fallback_warned", False):
+                print("[daemon] AVISO: firmware nao aceita um dos provedores (422); "
+                      "reenviando so com Claude/Codex. Compile e grave o firmware novo "
+                      "(pio run -t upload) para exibir OpenCode/Command Code.",
                       file=sys.stderr)
-                run._opencode_fallback_warned = True
+                run._unknown_tool_fallback_warned = True
             if args.protocol == 1:
                 payload = build_payload_v1(claude_dir, codex_index, args.max_sessions,
-                                           tz, hidden=hidden, pinned=pinned)
+                                           tz, hidden=hidden, pinned=pinned,
+                                           thresholds=limiares,
+                                           snooze_minutes=snooze_minutes,
+                                           codex_rollouts_dir=codex_rollouts_dir,
+                                           codex_state_db=codex_state_db,
+                                           retention_days=config.storage.retention_days)
                 st = payload["stats"]
             else:
                 payload = build_payload_v2(
                     claude_dir, codex_index, args.max_sessions, tz, node_id=node_id,
                     device_id=device_id, daemon_instance_id=daemon_instance_id,
-                    sequence=sequence, hidden=hidden, pinned=pinned)
+                    sequence=sequence, hidden=hidden, pinned=pinned,
+                    thresholds=limiares, snooze_minutes=snooze_minutes,
+                    codex_rollouts_dir=codex_rollouts_dir,
+                    codex_state_db=codex_state_db,
+                    retention_days=config.storage.retention_days)
                 st = payload["stats"]["usage"]
             today_tokens = usage_total_for_log(st)
             status = post_sessions(url, payload, timeout=config.transport.timeout_s,
@@ -797,6 +1179,24 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
 
         # So imprime quando o diagnostico MUDA: repetir o mesmo aviso a cada 5s vira
         # ruido e o operador para de ler justamente a linha que importa.
+        # Toast so depois do POST: o painel e o canal principal e nao deve esperar
+        # pelo secundario. Suprimido enquanto o mudo da placa estiver armado.
+        if ok:
+            maybe_toast(payload["sessions"], snooze_s)
+
+        # Severidade agregada no log, e so quando MUDA — mesma regra dos avisos de
+        # hook logo abaixo: repetir a cada 5s vira ruido.
+        severidade = worst_severity([s.get("severity", "none")
+                                     for s in payload["sessions"]])
+        if severidade != severidade_anterior:
+            if severidade != "none":
+                print("[daemon] alerta: {}{}".format(
+                    severidade, " (mudo {}s)".format(snooze_s) if snooze_s else ""),
+                    file=sys.stderr)
+            elif severidade_anterior and severidade_anterior != "none":
+                print("[daemon] alerta encerrado.", file=sys.stderr)
+            severidade_anterior = severidade
+
         avisos = hook_warnings(payload["sessions"], hook_health())
         if avisos != avisos_anteriores:
             for aviso in avisos:

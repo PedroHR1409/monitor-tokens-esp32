@@ -10,6 +10,39 @@ bool s_synced = false;
 uint8_t s_level = 0;
 bool s_backlightReady = false;
 
+// Nivel em torno do qual o pulso oscila. Escrito pelo apply_schedule (dia/noite) e
+// lido pelo pulse_tick. Separar base de nivel efetivo e o que impede o tick de 30s do
+// main.cpp de atropelar o pulso.
+uint8_t s_base = BRIGHTNESS_DAY;
+
+// Faixa e periodo de um degrau de severidade. periodMs == 0 significa "nao pulsa".
+struct PulseSpec {
+    uint16_t periodMs;
+    uint8_t  low;
+    uint8_t  high;
+};
+
+PulseSpec pulse_spec(SeverityLevel severity, uint8_t base) {
+    switch (severity) {
+        case SeverityLevel::WARNING:
+        case SeverityLevel::EXPIRED: {
+            const uint8_t delta = (uint8_t)((uint16_t)base * PULSE_WARN_AMPLITUDE_PCT / 100);
+            const uint16_t period = (severity == SeverityLevel::EXPIRED)
+                                  ? PULSE_EXPIRED_PERIOD_MS : PULSE_WARN_PERIOD_MS;
+            const uint16_t high = (uint16_t)base + delta;
+            return { period,
+                     (uint8_t)(base > delta ? base - delta : 0),
+                     (uint8_t)(high > 255 ? 255 : high) };
+        }
+        case SeverityLevel::CRITICAL:
+            // Faixa absoluta, nao derivada do base: aos 23h o base e 60 e um pulso
+            // relativo ficaria invisivel justamente no alerta que mais importa.
+            return { PULSE_CRIT_PERIOD_MS, PULSE_CRIT_LOW, PULSE_CRIT_HIGH };
+        default:
+            return { 0, base, base };
+    }
+}
+
 // A epoca do ESP comeca em 1970; sem NTP o ano fica em 1970. E o teste mais simples
 // e confiavel de "ja sincronizou".
 bool have_real_time(struct tm &out) {
@@ -89,7 +122,33 @@ void device_backlight_set(uint8_t level) {
 
 void device_backlight_apply_schedule() {
     int h, m;
-    if (!device_time_now(h, m)) return;      // sem relogio: fica no brilho de dia
+    if (!device_time_now(h, m)) return;      // sem relogio: fica no base de dia
     const bool night = (h >= NIGHT_START_HOUR) || (h < NIGHT_END_HOUR);
-    device_backlight_set(night ? BRIGHTNESS_NIGHT : BRIGHTNESS_DAY);
+    s_base = night ? BRIGHTNESS_NIGHT : BRIGHTNESS_DAY;
+}
+
+uint8_t device_backlight_base() {
+    return s_base;
+}
+
+uint8_t device_backlight_level() {
+    return s_level;
+}
+
+void device_backlight_pulse_tick(SeverityLevel severity, uint32_t nowMs) {
+    const PulseSpec spec = pulse_spec(severity, s_base);
+    if (!spec.periodMs) {
+        device_backlight_set(s_base);
+        return;
+    }
+    // Onda triangular: sobe na primeira metade do periodo, desce na segunda. Inteiros
+    // puros de proposito — float no caminho de um tick de 70ms nao se paga.
+    const uint32_t half = spec.periodMs / 2;
+    if (!half) { device_backlight_set(spec.high); return; }
+    const uint32_t phase = nowMs % spec.periodMs;
+    const uint32_t rise = (phase < half) ? phase : (spec.periodMs - phase);
+    const uint32_t span = (uint32_t)(spec.high - spec.low);
+    // device_backlight_set ja descarta valor repetido, entao o ledcWrite so acontece
+    // quando o duty muda de verdade.
+    device_backlight_set((uint8_t)(spec.low + (span * rise) / half));
 }

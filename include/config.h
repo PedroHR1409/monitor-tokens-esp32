@@ -41,6 +41,24 @@
 #define NIGHT_START_HOUR      22   // >= 22h  -> escurece
 #define NIGHT_END_HOUR         7   // <  7h   -> ainda escuro
 
+// --- Pulso de alerta (modula o brilho em torno do base do horario) ---
+// Escolhido em vez de piscar o fundo pela LVGL porque o render deste painel e FULL:
+// invalidar a tela custa um frame de 307KB (ver docs/SPEC.md, "Performance: a causa
+// raiz do drift"). Um pulso de PWM nao invalida NADA e ainda atinge 100% da tela, e
+// nao apenas as calhas de 8px entre os cards.
+#define PULSE_TICK_MS              70    // ~10 amostras no periodo critico
+#define PULSE_WARN_PERIOD_MS     2000    // perceptivel, nao incomodo
+#define PULSE_CRIT_PERIOD_MS      700    // razao 2,86x sobre o warning
+#define PULSE_EXPIRED_PERIOD_MS  1200    // cadencia propria: procedencia vencida
+#define PULSE_WARN_AMPLITUDE_PCT   30    // amplitude do warning, em % do base
+// Faixa ABSOLUTA de proposito: o critico precisa furar o base noturno de 60, senao o
+// alerta que mais importa e justamente o que se dissolve no escuro depois das 22h.
+#define PULSE_CRIT_LOW             40
+#define PULSE_CRIT_HIGH           255
+// Fallback do mudo quando o payload nao trouxer alerts.snooze_minutes (daemon
+// legado). O valor real e o do monitor.toml: trocar limiar nao pode exigir reflash.
+#define SNOOZE_MINUTES_DEFAULT     15
+
 // =====================================================================================
 // GRID / SESSOES
 // =====================================================================================

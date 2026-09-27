@@ -46,6 +46,24 @@ class WorktreeBranchTests(unittest.TestCase):
             plain.mkdir()
             self.assertEqual("sem git", read_git_branch(str(plain)))
 
+    def test_subdirectory_walks_up_to_repo_root(self):
+        """Sessao aberta num subdiretorio do repo: o .git esta no nivel de cima.
+        Sem walk-up o card aparecia 'sem git' e o operador nao identificava."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "repo" / ".git" / "refs").mkdir(parents=True)
+            (root / "repo" / ".git" / "HEAD").write_text(
+                "ref: refs/heads/feat/26925-add-sk" + chr(10))
+            subdir = root / "repo" / "src" / "modules"
+            subdir.mkdir(parents=True)
+            self.assertEqual("26925-add-sk", read_git_branch(str(subdir)))
+
+    def test_walk_up_stops_at_root_without_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = Path(tmp) / "a" / "b" / "c"
+            plain.mkdir(parents=True)
+            self.assertEqual("sem git", read_git_branch(str(plain)))
+
 
 if __name__ == "__main__":
     unittest.main()

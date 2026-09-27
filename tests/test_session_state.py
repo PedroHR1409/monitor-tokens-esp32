@@ -30,6 +30,14 @@ class SessionDisplayNameTests(unittest.TestCase):
         self.assertEqual("projeto", session_display_name("projeto", "MAIN"))
         self.assertEqual("fix-ao", session_display_name("projeto", "fix-ão"))
 
+    def test_sem_git_never_becomes_the_title(self):
+        """Varios cards de projetos distintos exibiam 'sem git' e o operador nao
+        sabia qual sessao era. Sem branch real, o nome do projeto (pasta do cwd)
+        e sempre mais identificavel."""
+        self.assertEqual("k1co", session_display_name("k1co", "sem git"))
+        self.assertEqual("Add-sk-commercial",
+                         session_display_name("Add-sk-commercial", "sem git"))
+
 
 if __name__ == "__main__":
     unittest.main()

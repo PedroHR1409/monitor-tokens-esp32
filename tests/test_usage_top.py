@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,6 +14,7 @@ TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 
 import session_daemon
+import session_meta
 import usage_top
 
 
@@ -58,6 +61,55 @@ class ClaudeTopTests(unittest.TestCase):
         self.assertEqual("new", out["sessions"][0]["name"])   # fallback: nome da pasta
 
 
+class CodexTopTests(unittest.TestCase):
+    SID = "01a0a5b9-6425-7382-8a15-5c810c93abcd"
+
+    def test_session_only_in_rollout_counts_for_the_podium(self):
+        """O session_index parou de receber sessoes novas (15/09/2026): o pódio
+        exibia 0 no card Codex mesmo com o Codex rodando no dia. O rollout no
+        disco entra, pela mesma uniao indice+rollouts dos coletores de sessao."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rollouts = root / "sessions"
+            path = (rollouts / "2026" / "08" / "28" /
+                    ("rollout-2026-08-28T12-00-00-" + self.SID + ".jsonl"))
+            path.parent.mkdir(parents=True)
+            events = [(NOW - timedelta(hours=1), 500),
+                      (NOW - timedelta(minutes=30), 1500)]
+            path.write_text("".join(json.dumps({
+                "timestamp": ts.isoformat(),
+                "payload": {"info": {"total_token_usage": {"total_tokens": total}}}}
+            ) + "\n" for ts, total in events), encoding="utf-8")
+            epoch = (NOW - timedelta(minutes=5)).timestamp()
+            os.utime(path, (epoch, epoch))
+            missing = root / "session_index.jsonl"   # indice sem a sessao
+            missing.write_text("", encoding="utf-8")
+            previous, prev_at = session_meta._cache, session_meta._cache_at
+            session_meta._cache, session_meta._cache_at = {}, 0.0
+            try:
+                with unittest.mock.patch.object(session_meta, "CODEX_SESSIONS",
+                                                rollouts):
+                    out = usage_top._codex(missing, NOW - timedelta(days=1), TZ,
+                                           NOW, 6, rollouts_dir=rollouts)
+            finally:
+                session_meta._cache, session_meta._cache_at = previous, prev_at
+                session_meta._meta_cache.clear()
+        self.assertEqual(1500, out["total"])
+        self.assertEqual(self.SID[:36], out["sessions"][0]["id"])
+        self.assertEqual("codex", out["sessions"][0]["name"])
+
+    def test_rollouts_disabled_keeps_hermetic_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sessions").mkdir()
+            path = (root / "sessions" /
+                    ("rollout-2026-08-28T12-00-00-" + self.SID + ".jsonl"))
+            path.write_text("", encoding="utf-8")
+            out = usage_top._codex(root / "missing-index", NOW - timedelta(days=1),
+                                   TZ, NOW, 6)
+        self.assertEqual(0, out["total"])    # sem rollouts_dir: nao varre disco real
+
+
 class PayloadTopTests(unittest.TestCase):
     def test_payload_carries_three_periods_and_legacy_omits(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,7 +121,8 @@ class PayloadTopTests(unittest.TestCase):
             top = payload["stats"]["usage"]["top"]
             self.assertEqual({"d1", "d7", "d30"}, set(top.keys()))
             for period in top.values():
-                self.assertEqual({"claude", "codex", "opencode"}, set(period.keys()))
+                self.assertEqual({"claude", "codex", "opencode", "commandcode"},
+                                 set(period.keys()))
                 for provider in period.values():
                     self.assertIn("total", provider)
                     self.assertIn("sessions", provider)
