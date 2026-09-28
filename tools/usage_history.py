@@ -9,9 +9,9 @@ Semântica de consumo (fixada no DEFINE): input + output + reasoning + cache.wri
 cache.read é re-leitura de contexto, não queima nova — incluiria ~3,4M contra ~150k
 reais num dia típico e esconderia a vareração que importa.
 
-O backfill normal preenche apenas dias sem linha. Em uma execução forçada,
-porém, ele pode substituir linhas antigas para reparar dados calculados antes
-de uma fonte ficar disponível.
+O backfill diário automático preenche apenas dias sem linha. A substituição de uma
+linha existente continua disponível na API de baixo nível para uma reparação explícita,
+mas não é usada no boot nem na atualização automática do daemon.
 """
 from __future__ import annotations
 
@@ -153,11 +153,13 @@ def prune_hourly(db_path: Path, keep_days: int = HOURLY_RETENTION_DAYS,
 def backfill_hourly(db_path: Path, *, claude_dir: Path | None,
                     rollouts_dir: Path | None, opencode_db: Path | None,
                     commandcode_dir: Path | None = None,
-                    now: datetime | None = None, days: int = WINDOW_DAYS) -> dict[str, int]:
+                    now: datetime | None = None, days: int = WINDOW_DAYS,
+                    replace_existing_since: datetime | None = None) -> dict[str, int]:
     """Agrega eventos por hora UTC/provedor/modelo e faz upsert idempotente.
 
-    Buckets sem eventos nesta leitura não são removidos: os arquivos-fonte podem ter
-    sido rotacionados depois da primeira gravação.
+    Buckets anteriores a ``replace_existing_since`` só são inseridos se ainda não
+    existirem. O daemon usa esse corte na hora UTC corrente; assim, reiniciar ou perder
+    uma fonte não reescreve horas fechadas. Buckets sem eventos nunca são removidos.
     """
     span = min(max(int(days), 0), WINDOW_DAYS)
     if span == 0:
@@ -165,6 +167,8 @@ def backfill_hourly(db_path: Path, *, claude_dir: Path | None,
     observed = _utc_datetime(now or datetime.now(timezone.utc))
     since = (observed.replace(hour=0, minute=0, second=0, microsecond=0)
              - timedelta(days=span - 1))
+    refresh_key = (_hour_key(replace_existing_since)
+                   if replace_existing_since is not None else None)
     aggregates: dict[tuple[str, str, str], dict] = {}
 
     def add(event) -> None:
@@ -215,17 +219,22 @@ def backfill_hourly(db_path: Path, *, claude_dir: Path | None,
         for key, bucket in sorted(aggregates.items()):
             components = tuple(bucket[name] if bucket["known"][name] else None
                                for name in ("input", "output", "reasoning", "cache_write"))
-            con.execute(
+            values = (*key, *components, bucket["consumed"])
+            insert = (
                 "INSERT INTO usage_history_hourly "
                 "(hour_start_utc, provider, model, input_tokens, output_tokens, "
                 "reasoning_tokens, cache_write_tokens, consumed_tokens) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(hour_start_utc, provider, model) DO UPDATE SET "
-                "input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, "
-                "reasoning_tokens=excluded.reasoning_tokens, "
-                "cache_write_tokens=excluded.cache_write_tokens, "
-                "consumed_tokens=excluded.consumed_tokens",
-                (*key, *components, bucket["consumed"]))
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ")
+            if refresh_key is not None and key[0] >= refresh_key:
+                con.execute(
+                    insert + "ON CONFLICT(hour_start_utc, provider, model) DO UPDATE SET "
+                    "input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, "
+                    "reasoning_tokens=excluded.reasoning_tokens, "
+                    "cache_write_tokens=excluded.cache_write_tokens, "
+                    "consumed_tokens=excluded.consumed_tokens", values)
+            else:
+                con.execute(insert + "ON CONFLICT(hour_start_utc, provider, model) "
+                            "DO NOTHING", values)
             recorded["|".join(key)] = bucket["consumed"]
     return recorded
 

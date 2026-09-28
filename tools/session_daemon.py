@@ -839,10 +839,11 @@ def _record_daily_history(history_db: Path, claude_dir: Path, tz: timezone,
 
     Codex entra pelo mesmo diff acumulado do codex_series (total = janela do dia
     local); OpenCode pelo window_tokens desde a meia-noite local. Backfill roda
-    quando a tabela esta vazia (primeiro boot) E quando `force_backfill` — o
-    INSERT OR IGNORE protege as linhas vivas, entao re-rodar so preenche dias que
-    o daemon ficou desligado: com o backfill limitado ao boot vazio, qualquer dia
-    sem daemon virava 0 para sempre (medido: 12–14/09/2026 sumiram do heatmap)."""
+    quando a tabela esta vazia e no boot/virada do dia. O backfill automatico usa
+    INSERT OR IGNORE: dias fechados ja gravados nao mudam quando fontes antigas
+    desaparecem ou sao parcialmente reprocessadas. `record_today` continua atualizando
+    somente o dia local corrente; dias ausentes durante uma parada podem ser preenchidos
+    pelo backfill sem sobrescrever os que ja existem."""
     from usage_tracker import codex_series
 
     codex = codex_series(CODEX_SESSIONS, tz, now)
@@ -858,8 +859,7 @@ def _record_daily_history(history_db: Path, claude_dir: Path, tz: timezone,
         gravados = usage_history.backfill(
             history_db, claude_dir=claude_dir, rollouts_dir=rollouts_dir,
             opencode_db=opencode_db, tz=tz, now=now,
-            commandcode_dir=commandcode_dir,
-            replace_existing=force_backfill)
+            commandcode_dir=commandcode_dir)
         print(f"[daemon] backfill do historico: {len(gravados)} dias "
               f"({sum(gravados.values()):,} tokens)", file=sys.stderr)
     usage_history.record_today(history_db, total_today, tz, now)
@@ -892,7 +892,9 @@ def _record_hourly_history(history_db: Path, claude_dir: Path, now: datetime, *,
         usage_history.backfill_hourly(
             key, claude_dir=claude_dir, rollouts_dir=rollouts_dir,
             opencode_db=opencode_db, commandcode_dir=commandcode_dir,
-            now=observed, days=days)
+            now=observed, days=days,
+            replace_existing_since=observed.replace(minute=0, second=0,
+                                                    microsecond=0))
         usage_history.prune_hourly(key, keep_days=retention_days, now=observed)
     except Exception as exc:
         print(f"[daemon] histórico horário indisponível: {exc}", file=sys.stderr)

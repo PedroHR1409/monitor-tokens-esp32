@@ -63,13 +63,15 @@ novamente em `cache_write_tokens`, sem alterar o total legado.
 ### 4. Backfill e atualização idempotentes
 
 Backfill inicial/forçado percorre até 30 dias (`min(hourly_retention_days,
-usage_history.WINDOW_DAYS)`) e agrupa eventos por chave horária. Isso preserva a janela
-já usada pelo backfill diário e evita uma varredura anual no startup. No daemon ativo,
-a janela do dia corrente é recalculada no máximo a cada 60s. Um `UPSERT` substitui o
-agregado daquela chave, em vez de somar novamente o resultado de cada varredura.
-Buckets persistidos sem evento retornado não são apagados, para que rotação de
-transcripts não destrua histórico já gravado. As linhas se acumulam até a retenção
-configurada, limitada a 365 dias por default.
+usage_history.WINDOW_DAYS)`) e agrupa eventos por chave horária, evitando uma varredura
+anual no startup. Chaves anteriores ao dia UTC corrente usam `INSERT OR IGNORE`:
+buckets ausentes são preenchidos, mas os já gravados não são substituídos em
+reinicializações nem quando uma fonte desaparece. Somente a hora UTC corrente é
+recalculada no máximo a cada 60s por `UPSERT`. Buckets sem evento retornado nunca são
+apagados. As linhas se acumulam até a retenção configurada (default 365 dias).
+
+O histórico diário segue a mesma estabilidade: o backfill automático preenche dias
+ausentes com `INSERT OR IGNORE`; `record_today` recalcula somente o dia local corrente.
 
 ### 5. Retenção própria
 
@@ -81,7 +83,8 @@ configurada, limitada a 365 dias por default.
 1. Cada coletor produz evento `{at, provider, model, input, output, reasoning, cache_write, consumed}`.
 2. A camada de histórico valida/clampa valores e arredonda `at` ao início UTC da hora.
 3. Eventos são agregados por `(hour_start_utc, provider, model)`.
-4. SQLite faz upsert em transação; o daily table segue o caminho atual.
+4. SQLite preenche períodos ausentes e atualiza por upsert somente a hora corrente;
+   dias e horas fechados permanecem estáveis após persistidos.
 5. O daemon atualiza o dia no máximo a cada 60s, aplica prune com `hourly_retention_days`
    e encerra a conexão.
 

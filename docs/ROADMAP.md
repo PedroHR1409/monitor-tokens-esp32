@@ -83,7 +83,9 @@ a tela), então a borda virou estática e o movimento migrou para o backlight; e
 **Implementado em 2026-09-27 (back-end).** `usage_history_hourly` registra
 eventos dos quatro provedores por hora UTC, provedor e modelo; `hourly_range`
 consulta os buckets e `storage.hourly_retention_days` aplica a retenção. O
-histórico diário e o payload do painel permanecem compatíveis.
+histórico diário e o payload do painel permanecem compatíveis. Backfill automático
+preenche períodos fechados ausentes sem substituir dias ou horas já gravados; somente
+a hora UTC corrente é recalculada.
 
 **Problema.** `usage_history` guarda apenas `(day, tokens)` — um total agregado por dia.
 Isso impede qualquer análise mais fina que "quanto no dia inteiro".
