@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Mapping
 
 
@@ -13,6 +14,24 @@ class UsageSeries:
     buckets: Mapping[str, int]
     total: int
     quality: str
+
+
+@dataclass(frozen=True)
+class UsageBreakdown:
+    """Evento de consumo com componentes disponíveis pela fonte.
+
+    ``None`` significa que o provedor não expôs aquele componente; ``consumed_tokens``
+    mantém a semântica de consumo usada pelos agregados existentes.
+    """
+
+    at: datetime
+    provider: str
+    model: str
+    input_tokens: int | None
+    output_tokens: int | None
+    reasoning_tokens: int | None
+    cache_write_tokens: int | None
+    consumed_tokens: int
 
 
 def combine_usage(*series: UsageSeries) -> tuple[UsageSeries, ...]:

@@ -29,6 +29,7 @@ from session_hook import load_event_store
 from session_state import (PERM_MARKER_MAX_AGE_S, WORK_MAX_AGE_S, parse_ts,
                            session_display_name, strip_accents)
 from session_meta import read_git_branch
+from usage_model import UsageBreakdown
 
 FULL_NAME_MAX = 38
 SOURCE_STALE_AFTER_S = 300.0
@@ -181,7 +182,8 @@ def _usage_events(messages: list) -> list:
         prompt = int(usage.get("inputTokens") or 0)
         cached = int(usage.get("cacheReadTokens") or 0)
         tokens = max(0, prompt - cached) + int(usage.get("outputTokens") or 0)
-        out.append({"id": key, "at": stamp, "tokens": tokens, "context": prompt})
+        out.append({"id": key, "at": stamp, "tokens": tokens, "context": prompt,
+                    "message": message, "usage": usage, "model": obj.get("model")})
     return out
 
 
@@ -319,6 +321,12 @@ def window_tokens(directory: Path | None, since_epoch: float | None = None) -> i
 
 def turn_token_events(directory: Path | None, since: datetime | None = None):
     """Pares (datetime_utc, tokens) por turno, mais antigo primeiro (backfill diario)."""
+    for event in turn_usage_events(directory, since):
+        yield event.at, event.consumed_tokens
+
+
+def turn_usage_events(directory: Path | None, since: datetime | None = None):
+    """Eventos detalhados por mensagem; preserva dedup e semântica de consumo."""
     root = Path(directory) if directory is not None else projects_dir()
     try:
         candidates = sorted(root.glob("*/*.jsonl"),
@@ -332,7 +340,22 @@ def turn_token_events(directory: Path | None, since: datetime | None = None):
                 continue
             if start_ts is not None and event["at"].timestamp() < start_ts:
                 continue
-            yield event["at"], event["tokens"]
+            message = event.get("message") or {}
+            usage = event.get("usage") or {}
+            prompt = max(int(usage.get("inputTokens") or 0), 0)
+            cached = max(int(usage.get("cacheReadTokens") or 0), 0)
+            cache_write = (max(int(usage.get("cacheWriteTokens") or 0), 0)
+                           if "cacheWriteTokens" in usage else None)
+            input_tokens = max(prompt - cached - (cache_write or 0), 0)
+            output_tokens = max(int(usage.get("outputTokens") or 0), 0)
+            reasoning = (max(int(usage.get("reasoningTokens") or 0), 0)
+                         if "reasoningTokens" in usage else None)
+            yield UsageBreakdown(
+                at=event["at"], provider="commandcode",
+                model=str(event.get("model") or message.get("model") or "unknown"),
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                reasoning_tokens=reasoning, cache_write_tokens=cache_write,
+                consumed_tokens=event["tokens"])
 
 
 def count_active_12h(directory: Path | None, now: datetime, window_s: float) -> int:

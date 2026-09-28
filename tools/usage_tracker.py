@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from session_state import parse_ts
-from usage_model import UsageSeries, combine_usage
+from usage_model import UsageBreakdown, UsageSeries, combine_usage
 
 CHUNK = 256 * 1024      # bloco de leitura reversa
 MAX_BACK = 8 * 1024 * 1024   # teto por arquivo, evita varrer um transcript gigante
@@ -115,6 +115,53 @@ def dedup_tokens(seen: set, obj: dict) -> int:
             return 0
         seen.add(mid)
     return tokens
+
+
+def claude_usage_events(projects_dir: Path, since: datetime):
+    """Eventos Claude detalhados desde `since`, deduplicados por `message.id`."""
+    if not projects_dir.is_dir():
+        return
+    start_ts = since.timestamp()
+    seen: set[str] = set()
+    for project in projects_dir.iterdir():
+        if not project.is_dir():
+            continue
+        for path in project.glob("*.jsonl"):
+            try:
+                if path.stat().st_mtime < start_ts:
+                    continue
+                events = _iter_today_events(path, since)
+                for obj, stamp in events:
+                    message = obj.get("message")
+                    usage = message.get("usage") if isinstance(message, dict) else None
+                    if obj.get("type") != "assistant" or not isinstance(usage, dict):
+                        continue
+                    mid = str(message.get("id") or "")
+                    if mid and mid in seen:
+                        continue
+                    total = _usage_of(obj)[1]
+                    if total <= 0:
+                        continue
+                    if mid:
+                        seen.add(mid)
+
+                    def measured(*keys: str) -> int | None:
+                        for key in keys:
+                            if key in usage:
+                                return max(int(usage.get(key) or 0), 0)
+                        return None
+
+                    model = str(message.get("model") or obj.get("model") or "unknown")
+                    yield UsageBreakdown(
+                        at=stamp, provider="claude", model=model,
+                        input_tokens=measured("input_tokens"),
+                        output_tokens=measured("output_tokens"),
+                        reasoning_tokens=measured("reasoning_tokens",
+                                                  "reasoning_output_tokens"),
+                        cache_write_tokens=measured("cache_creation_input_tokens"),
+                        consumed_tokens=total)
+            except OSError:
+                continue
 
 
 def collect(projects_dir: Path, tz: timezone,
@@ -222,6 +269,105 @@ def _rollout_total_events(path: Path):
                     yield timestamp, _billable_total_usage(usage)
                 except (TypeError, ValueError):
                     continue
+    except OSError:
+        return
+
+
+def _rollout_breakdown_events(path: Path):
+    """Snapshots Codex com modelo e componentes cumulativos, em ordem do arquivo."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            model = "unknown"
+            for line in handle:
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = obj.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                turn = payload.get("turn_context")
+                candidate = (payload.get("model")
+                             or (turn.get("model") if isinstance(turn, dict) else None)
+                             or obj.get("model"))
+                if candidate:
+                    model = str(candidate)
+                info = payload.get("info")
+                usage = info.get("total_token_usage") if isinstance(info, dict) else None
+                if not isinstance(usage, dict) or usage.get("total_tokens") is None:
+                    continue
+                stamp = parse_ts(obj.get("timestamp"))
+                if stamp is None:
+                    continue
+                detailed = any(key in usage for key in (
+                    "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+                    "output_tokens", "reasoning_output_tokens"))
+                components: dict[str, int | None] = {
+                    "input": None, "output": None,
+                    "reasoning": None, "cache_write": None,
+                }
+                if detailed:
+                    if "input_tokens" in usage:
+                        input_tokens = max(int(usage.get("input_tokens") or 0), 0)
+                        cached = max(int(usage.get("cached_input_tokens") or 0), 0)
+                        cache_write = max(
+                            int(usage.get("cache_write_input_tokens") or 0), 0)
+                        components["input"] = max(input_tokens - cached - cache_write, 0)
+                    if "output_tokens" in usage:
+                        components["output"] = max(
+                            int(usage.get("output_tokens") or 0), 0)
+                    if "reasoning_output_tokens" in usage:
+                        components["reasoning"] = max(
+                            int(usage.get("reasoning_output_tokens") or 0), 0)
+                    if "cache_write_input_tokens" in usage:
+                        components["cache_write"] = max(
+                            int(usage.get("cache_write_input_tokens") or 0), 0)
+                try:
+                    total = _billable_total_usage(usage)
+                except (TypeError, ValueError):
+                    continue
+                yield stamp, model, components, total
+    except OSError:
+        return
+
+
+def codex_usage_events(rollouts_dir: Path, since: datetime):
+    """Deltas Codex por evento, respeitando reset de contadores cumulativos."""
+    if not rollouts_dir.is_dir():
+        return
+    start_ts = since.timestamp()
+    try:
+        paths = rollouts_dir.rglob("rollout-*.jsonl")
+        for path in paths:
+            try:
+                if path.stat().st_mtime < start_ts:
+                    continue
+            except OSError:
+                continue
+            previous_total: int | None = None
+            previous: dict[str, int | None] = {
+                "input": None, "output": None,
+                "reasoning": None, "cache_write": None,
+            }
+            events = sorted(_rollout_breakdown_events(path), key=lambda item: item[0])
+            for stamp, model, current, cumulative in events:
+                deltas: dict[str, int | None] = {}
+                for name, value in current.items():
+                    old = previous[name]
+                    deltas[name] = (None if value is None else
+                                    value if old is None or value < old else value - old)
+                delta = (cumulative if previous_total is None or cumulative < previous_total
+                         else cumulative - previous_total)
+                previous_total = cumulative
+                previous = current
+                if stamp < since or delta <= 0:
+                    continue
+                yield UsageBreakdown(
+                    at=stamp, provider="codex", model=model,
+                    input_tokens=deltas["input"], output_tokens=deltas["output"],
+                    reasoning_tokens=deltas["reasoning"],
+                    cache_write_tokens=deltas["cache_write"],
+                    consumed_tokens=delta)
     except OSError:
         return
 

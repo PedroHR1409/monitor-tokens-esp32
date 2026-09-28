@@ -1,4 +1,4 @@
-"""Histórico diário de tokens do Monitor.AI — persistência, janela e backfill.
+"""Históricos diário e horário de tokens do Monitor.AI.
 
 O heatmap de 30 dias precisa de um total por dia local que sobreviva a restart do
 daemon e à rotação dos arquivos-fonte (transcripts e rollouts somem com o tempo).
@@ -26,10 +26,19 @@ from session_state import parse_ts
 # Alinhado a StorageSettings.retention_days (monitor_config). O daemon passa o valor
 # do config explicitamente; esta constante e so o default de chamadas diretas.
 RETENTION_DAYS = 30
+HOURLY_RETENTION_DAYS = 365
 WINDOW_DAYS = 30
 
 _SCHEMA = ("CREATE TABLE IF NOT EXISTS usage_history ("
            "day TEXT PRIMARY KEY, tokens INTEGER NOT NULL)")
+_HOURLY_SCHEMA = ("CREATE TABLE IF NOT EXISTS usage_history_hourly ("
+                  "hour_start_utc TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, "
+                  "input_tokens INTEGER CHECK(input_tokens IS NULL OR input_tokens >= 0), "
+                  "output_tokens INTEGER CHECK(output_tokens IS NULL OR output_tokens >= 0), "
+                  "reasoning_tokens INTEGER CHECK(reasoning_tokens IS NULL OR reasoning_tokens >= 0), "
+                  "cache_write_tokens INTEGER CHECK(cache_write_tokens IS NULL OR cache_write_tokens >= 0), "
+                  "consumed_tokens INTEGER NOT NULL CHECK(consumed_tokens >= 0), "
+                  "PRIMARY KEY(hour_start_utc, provider, model))")
 
 
 @contextmanager
@@ -41,6 +50,9 @@ def _connect(db_path: Path):
     con = sqlite3.connect(db_path)
     try:
         con.execute(_SCHEMA)
+        con.execute(_HOURLY_SCHEMA)
+        con.execute("CREATE INDEX IF NOT EXISTS usage_history_hourly_by_hour "
+                    "ON usage_history_hourly(hour_start_utc)")
         yield con
         con.commit()
     finally:
@@ -91,6 +103,131 @@ def prune(db_path: Path, keep_days: int = RETENTION_DAYS, tz: timezone = timezon
 def is_empty(db_path: Path) -> bool:
     with _connect(db_path) as con:
         return con.execute("SELECT COUNT(*) FROM usage_history").fetchone()[0] == 0
+
+
+def hourly_is_empty(db_path: Path) -> bool:
+    with _connect(db_path) as con:
+        return con.execute("SELECT COUNT(*) FROM usage_history_hourly").fetchone()[0] == 0
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _hour_key(value: datetime) -> str:
+    hour = _utc_datetime(value).replace(minute=0, second=0, microsecond=0)
+    return hour.isoformat(timespec="seconds")
+
+
+def hourly_range(db_path: Path, start: datetime, end: datetime) -> list[dict]:
+    """Linhas ordenadas para intervalo UTC semiaberto [start, end)."""
+    start_key = _utc_datetime(start).isoformat(timespec="seconds")
+    end_key = _utc_datetime(end).isoformat(timespec="seconds")
+    columns = ("hour_start_utc", "provider", "model", "input_tokens",
+               "output_tokens", "reasoning_tokens", "cache_write_tokens",
+               "consumed_tokens")
+    with _connect(db_path) as con:
+        rows = con.execute(
+            "SELECT " + ", ".join(columns) + " FROM usage_history_hourly "
+            "WHERE julianday(hour_start_utc) >= julianday(?) "
+            "AND julianday(hour_start_utc) < julianday(?) "
+            "ORDER BY hour_start_utc, provider, model", (start_key, end_key))
+        return [dict(zip(columns, row)) for row in rows]
+
+
+def prune_hourly(db_path: Path, keep_days: int = HOURLY_RETENTION_DAYS,
+                 now: datetime | None = None) -> int:
+    """Remove buckets anteriores à retenção horária UTC configurada."""
+    observed = _utc_datetime(now or datetime.now(timezone.utc))
+    cutoff = (observed - timedelta(days=max(int(keep_days), 0)))
+    cutoff = cutoff.replace(minute=0, second=0, microsecond=0)
+    cutoff_key = cutoff.isoformat(timespec="seconds")
+    with _connect(db_path) as con:
+        cursor = con.execute("DELETE FROM usage_history_hourly WHERE hour_start_utc < ?",
+                             (cutoff_key,))
+        return cursor.rowcount if cursor.rowcount > 0 else 0
+
+
+def backfill_hourly(db_path: Path, *, claude_dir: Path | None,
+                    rollouts_dir: Path | None, opencode_db: Path | None,
+                    commandcode_dir: Path | None = None,
+                    now: datetime | None = None, days: int = WINDOW_DAYS) -> dict[str, int]:
+    """Agrega eventos por hora UTC/provedor/modelo e faz upsert idempotente.
+
+    Buckets sem eventos nesta leitura não são removidos: os arquivos-fonte podem ter
+    sido rotacionados depois da primeira gravação.
+    """
+    span = min(max(int(days), 0), WINDOW_DAYS)
+    if span == 0:
+        return {}
+    observed = _utc_datetime(now or datetime.now(timezone.utc))
+    since = (observed.replace(hour=0, minute=0, second=0, microsecond=0)
+             - timedelta(days=span - 1))
+    aggregates: dict[tuple[str, str, str], dict] = {}
+
+    def add(event) -> None:
+        if event.consumed_tokens <= 0:
+            return
+        key = (_hour_key(event.at), str(event.provider or "unknown"),
+               str(event.model or "unknown"))
+        bucket = aggregates.setdefault(key, {
+            "input": 0, "output": 0, "reasoning": 0, "cache_write": 0,
+            "known": {"input": True, "output": True,
+                      "reasoning": True, "cache_write": True},
+            "consumed": 0,
+        })
+        for name, value in (("input", event.input_tokens),
+                            ("output", event.output_tokens),
+                            ("reasoning", event.reasoning_tokens),
+                            ("cache_write", event.cache_write_tokens)):
+            if value is None:
+                bucket["known"][name] = False
+            else:
+                bucket[name] += max(int(value), 0)
+        bucket["consumed"] += max(int(event.consumed_tokens), 0)
+
+    def collect(events) -> None:
+        try:
+            for event in events:
+                add(event)
+        except (OSError, sqlite3.Error, TypeError, ValueError, KeyError, AttributeError):
+            # Uma fonte parcial/temporariamente indisponível não invalida as demais.
+            return
+
+    # Imports tardios mantêm o caminho diário independente dos coletores detalhados.
+    if claude_dir is not None and Path(claude_dir).is_dir():
+        from usage_tracker import claude_usage_events
+        collect(claude_usage_events(Path(claude_dir), since))
+    if rollouts_dir is not None and Path(rollouts_dir).is_dir():
+        from usage_tracker import codex_usage_events
+        collect(codex_usage_events(Path(rollouts_dir), since))
+    if opencode_db is not None and Path(opencode_db).is_file():
+        from opencode_sessions import turn_usage_events
+        collect(turn_usage_events(Path(opencode_db), since))
+    if commandcode_dir is not None and Path(commandcode_dir).is_dir():
+        from commandcode_sessions import turn_usage_events
+        collect(turn_usage_events(Path(commandcode_dir), since))
+
+    recorded: dict[str, int] = {}
+    with _connect(db_path) as con:
+        for key, bucket in sorted(aggregates.items()):
+            components = tuple(bucket[name] if bucket["known"][name] else None
+                               for name in ("input", "output", "reasoning", "cache_write"))
+            con.execute(
+                "INSERT INTO usage_history_hourly "
+                "(hour_start_utc, provider, model, input_tokens, output_tokens, "
+                "reasoning_tokens, cache_write_tokens, consumed_tokens) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(hour_start_utc, provider, model) DO UPDATE SET "
+                "input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, "
+                "reasoning_tokens=excluded.reasoning_tokens, "
+                "cache_write_tokens=excluded.cache_write_tokens, "
+                "consumed_tokens=excluded.consumed_tokens",
+                (*key, *components, bucket["consumed"]))
+            recorded["|".join(key)] = bucket["consumed"]
+    return recorded
 
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,7 @@ Isso inclui homes isolados por hosts como o Orca. Sem essa variável, o padrão
 | `session_hook.py` (biblioteca) | `hook_health`/`load_event_store` usados pelo daemon |
 | `usage_tracker.py` | tokens por sessão e séries históricas (transcripts Claude) |
 | `usage_model.py` | tipos de série de uso e combinação entre provedores |
+| `usage_history.py` | histórico diário e horário: SQLite, backfill, consulta e retenção |
 | `quota.py` | cota 5h/semanal: oficial do Codex; estimada de Claude/OpenCode/Command Code |
 | `opencode_sessions.py` | coletor OpenCode (SQLite local; provider/modelo/effort) |
 | `commandcode_sessions.py` | coletor Command Code (transcripts JSONL; estado por hooks + inferência) |
@@ -81,5 +82,7 @@ apague sem remover também a expectativa dos testes; não ligue sem uma feature:
 |---|---|
 | `transport.prefer_websocket` | Reserva — HTTP simples é suficiente para ≤6 sessões |
 | `daemon.role` | Reserva — escopo single-machine, sempre `standalone` |
-| `storage.hourly_retention_days` | Reserva — o schema é diário `(day, tokens)`; destrava o item #2 do `docs/ROADMAP.md` |
 | `--protocol 2` / `protocol_v2.py` | Reserva — o firmware serve só o v1; `--protocol 2` responde 404 |
+
+`storage.hourly_retention_days` controla `usage_history_hourly`, agregado por hora UTC,
+provedor e modelo; o payload do painel continua lendo o historico diario existente.
