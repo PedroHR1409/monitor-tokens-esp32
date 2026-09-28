@@ -7,11 +7,13 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 
 import usage_history
+from usage_model import UsageBreakdown
 from usage_tracker import codex_series  # noqa: F401  (contrato de janela do dia)
 
 TZ = timezone(timedelta(hours=-3))
@@ -170,6 +172,43 @@ class PersistenceTests(unittest.TestCase):
         window = usage_history.daily_window(self.db, TZ, now=NOW)
         self.assertEqual(50, window[27])             # contado uma unica vez
 
+    def test_hourly_backfill_preserves_closed_hours_and_refreshes_current_hour(self):
+        projects = Path(self._tmp.name) / "projects"
+        projects.mkdir()
+        closed_hour = NOW - timedelta(days=1)
+        current_hour = NOW.replace(minute=0, second=0, microsecond=0)
+
+        def event(at: datetime, tokens: int) -> UsageBreakdown:
+            return UsageBreakdown(
+                at=at, provider="claude", model="claude-test",
+                input_tokens=tokens, output_tokens=0, reasoning_tokens=0,
+                cache_write_tokens=0, consumed_tokens=tokens)
+
+        with patch("usage_tracker.claude_usage_events", return_value=[
+                event(closed_hour, 100), event(current_hour, 200)]):
+            usage_history.backfill_hourly(
+                self.db, claude_dir=projects, rollouts_dir=None,
+                opencode_db=None, now=NOW, days=30,
+                replace_existing_since=current_hour)
+
+        with patch("usage_tracker.claude_usage_events", return_value=[
+                event(closed_hour, 7000), event(current_hour, 9000)]):
+            usage_history.backfill_hourly(
+                self.db, claude_dir=projects, rollouts_dir=None,
+                opencode_db=None, now=NOW, days=30,
+                replace_existing_since=current_hour)
+
+        con = sqlite3.connect(self.db)
+        try:
+            rows = {row[0]: row[1:] for row in con.execute(
+                "SELECT hour_start_utc, input_tokens, consumed_tokens "
+                "FROM usage_history_hourly WHERE provider = 'claude' "
+                "AND model = 'claude-test'")}
+        finally:
+            con.close()
+        self.assertEqual((100, 100), rows[usage_history._hour_key(closed_hour)])
+        self.assertEqual((9000, 9000), rows[usage_history._hour_key(current_hour)])
+
 
 class CodexBackfillTests(unittest.TestCase):
     def test_codex_excludes_cached_input_from_consumption(self):
@@ -259,6 +298,26 @@ class PayloadIntegrationTests(unittest.TestCase):
                 history_db=db, force_backfill=True,
                 codex_rollouts_dir=root / "rollouts")
             self.assertEqual(7000, payload["stats"]["history"]["daily"][28])
+
+    def test_startup_backfill_preserves_closed_days_and_refreshes_today(self):
+        import session_daemon
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            projects = root / "claude" / "proj"
+            yesterday = NOW - timedelta(days=1)
+            _write_transcript(projects, "usage.jsonl", [
+                (yesterday, 7000), (NOW, 8000)])
+            db = root / "hist.db"
+            usage_history.record_today(db, 123, TZ, yesterday)
+
+            with patch.object(session_daemon, "CODEX_SESSIONS", root / "missing-codex"):
+                history = session_daemon._record_daily_history(
+                    db, root / "claude", TZ, NOW, 999,
+                    opencode_db=None, force_backfill=True,
+                    rollouts_dir=None, commandcode_dir=None)
+
+        self.assertEqual(123, history["daily"][28])  # dia fechado preservado
+        self.assertEqual(999, history["daily"][29])  # dia corrente atualizado
 
     def test_v2_projects_history_block(self):
         import session_daemon
