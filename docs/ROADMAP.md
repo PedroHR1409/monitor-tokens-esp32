@@ -31,7 +31,7 @@ começa por fechar esses circuitos, e só depois adiciona dado novo.
 | # | Item | Tier | Estado | Depende de |
 |---|---|---|---|---|
 | 1 | [Alerta escalonado + snooze](#1--alerta-escalonado--snooze-a1--b3) | A+B | 🟢 Construído (aguarda validação em hardware) | — |
-| 2 | [Esquema de uso com grão horário e breakdown](#2--esquema-de-uso-com-grão-horário-e-breakdown-a4) | A | ⚪ Planejado | — |
+| 2 | [Esquema de uso com grão horário e breakdown](#2--esquema-de-uso-com-grão-horário-e-breakdown-a4) | A | 🟢 Construído (back-end; sem painel) | — |
 | 3 | [Custo em R$/US$](#3--custo-em-rus-b1) | B | ⚪ Planejado | #2 |
 | 4 | [Tempo de agente bloqueado](#4--tempo-de-agente-bloqueado-b2) | B | ⚪ Planejado | — |
 | 5 | [Export do histórico](#5--export-do-histórico-b4) | B | ⚪ Planejado | #2, #4 |
@@ -53,7 +53,7 @@ servido pelo daemon, foco de janela do terminal por toque no card. O Command Cod
 O painel avisa que algo depende de você, mas não que já está esperando demais — e não
 avisa nada se você não estiver olhando para a mesa.
 
-**Evidência.** `tools/monitor_config.py:80-82` declara `warning_after_s = 90`,
+**Evidência inicial.** `tools/monitor_config.py:80-82` declara `warning_after_s = 90`,
 `critical_after_s = 300` e `snooze_minutes = 15`. Nenhum consumidor no repo inteiro.
 O firmware já tem `update_alert()` (`src/ui/ui_dashboard.cpp:1142`) e já recebe
 `elapsed` por sessão.
@@ -80,19 +80,24 @@ a tela), então a borda virou estática e o movimento migrou para o backlight; e
 
 ## 2 · Esquema de uso com grão horário e breakdown (A4)
 
+**Implementado em 2026-09-27 (back-end).** `usage_history_hourly` registra
+eventos dos quatro provedores por hora UTC, provedor e modelo; `hourly_range`
+consulta os buckets e `storage.hourly_retention_days` aplica a retenção. O
+histórico diário e o payload do painel permanecem compatíveis.
+
 **Problema.** `usage_history` guarda apenas `(day, tokens)` — um total agregado por dia.
 Isso impede qualquer análise mais fina que "quanto no dia inteiro".
 
-**Evidência.** `tools/usage_history.py:29-30` (schema) e `storage.hourly_retention_days
+**Evidência inicial.** `tools/usage_history.py:29-30` (schema) e `storage.hourly_retention_days
 = 365` declarado no config sem nenhum consumidor.
 
 **Escopo.** Migração aditiva do schema para grão horário com breakdown por tipo de
 token (input, output, reasoning, cache.write), preservando a semântica de consumo já
 fixada no DEFINE. Destrava "hoje por hora" e comparação semana a semana no card 7.
 
-**Nota de dívida encontrada:** `RETENTION_DAYS = 35` em `usage_history.py:26` contra
-`retention_days: int = 30` no config — mesma família de desconexão config↔código do
-item 1; corrigir junto.
+**Nota de dívida resolvida:** `storage.hourly_retention_days` agora controla o
+prune horário (default 365); `storage.retention_days` segue controlando o
+histórico diário (default 30), sem compartilhar a retenção.
 
 ## 3 · Custo em R$/US$ (B1)
 

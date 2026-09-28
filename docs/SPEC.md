@@ -1066,9 +1066,24 @@ tomada em 2026-09-19 e esta registrada no `docs/ROADMAP.md`.
 |---|---|---|
 | `transport.prefer_websocket` | `monitor.toml` / `TransportSettings` | Reserva — HTTP simples e suficiente para <=6 sessoes em polling de 5s |
 | `daemon.role` | `monitor.toml` / `DaemonSettings` | Reserva — escopo single-machine; sempre `standalone` |
-| `storage.hourly_retention_days` | `monitor.toml` / `StorageSettings` | Reserva — o schema de `usage_history` e diario `(day, tokens)`; destrava o item #2 do ROADMAP |
 | `--protocol 2` / `tools/protocol_v2.py` | CLI + modulo Python | Reserva — o firmware serve so o v1 de `/sessions`; `--protocol 2` responde 404. O doctor declara isso em vez de "cannot be verified" |
 
 **`storage.retention_days` NAO e reserva:** e o valor efetivo do prune, repassado pelo
 daemon ate `usage_history.prune`. `usage_history.RETENTION_DAYS` (30) e apenas o default
 de chamadas diretas e espelha o default de `StorageSettings`.
+
+## 22. Historico horario de tokens
+
+O daemon mantem `usage_history_hourly` como tabela aditiva ao historico diario. Cada
+linha e identificada por `(hour_start_utc, provider, model)` e contem
+`input_tokens`, `output_tokens`, `reasoning_tokens`, `cache_write_tokens` e
+`consumed_tokens`. Componentes que a fonte nao informa ficam `NULL`; o total conserva
+a semantica de consumo ja usada por cada coletor e exclui `cache.read`.
+
+O backfill usa eventos brutos disponiveis, cobre no maximo os ultimos 30 dias e e
+idempotente. O daemon reprocessa a janela do dia atual no maximo uma vez por minuto.
+Buckets sem evento em uma leitura nao sao apagados, pois a fonte pode ter sido
+rotacionada. `storage.hourly_retention_days` (default 365) controla o prune dessa
+tabela; `storage.retention_days` continua controlando somente `usage_history`.
+`usage_history.hourly_range(start, end)` expoe consulta ordenada em intervalo UTC
+semiaberto `[start, end)`. O payload e o firmware v1 nao mudam.

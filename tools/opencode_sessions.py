@@ -23,6 +23,7 @@ from pathlib import Path
 
 from session_state import session_display_name, strip_accents, WORK_MAX_AGE_S
 from session_meta import read_git_branch
+from usage_model import UsageBreakdown
 
 DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
@@ -456,11 +457,8 @@ def perm_signals_from_log(log_path: Path | None, now: datetime) -> dict[str, flo
     return asks
 
 
-def turn_token_events(database: Path | None, since: datetime | None = None):
-    """Pares (datetime_utc, tokens) por turno do OpenCode, mais antigo primeiro.
-
-    Mesma semântica do tokensWin (input+output+reasoning+cache.write); consumido
-    pelo backfill do histórico diário. `since` filtra por time_created."""
+def turn_usage_events(database: Path | None, since: datetime | None = None):
+    """Eventos detalhados por turno; `since` filtra por time_created."""
     params: tuple = ()
     query = "SELECT data, time_created FROM message"
     if since is not None:
@@ -479,12 +477,28 @@ def turn_token_events(database: Path | None, since: datetime | None = None):
         if not isinstance(tokens, dict):
             continue
         cache = tokens.get("cache") or {}
-        total = (int(tokens.get("input") or 0) + int(tokens.get("output") or 0)
-                 + int(tokens.get("reasoning") or 0) + int(cache.get("write") or 0))
+        input_tokens = max(int(tokens.get("input") or 0), 0)
+        output_tokens = max(int(tokens.get("output") or 0), 0)
+        reasoning_tokens = max(int(tokens.get("reasoning") or 0), 0)
+        cache_write = max(int(cache.get("write") or 0), 0) if "write" in cache else None
+        total = input_tokens + output_tokens + reasoning_tokens + (cache_write or 0)
         if total <= 0:
             continue
         created = message.get("time_created") or 0
-        yield datetime.fromtimestamp(created / 1000.0, tz=timezone.utc), total
+        stamp = datetime.fromtimestamp(created / 1000.0, tz=timezone.utc)
+        model = str(data.get("modelID") or data.get("model") or "unknown")
+        yield UsageBreakdown(
+            at=stamp, provider="opencode", model=model,
+            input_tokens=input_tokens if "input" in tokens else None,
+            output_tokens=output_tokens if "output" in tokens else None,
+            reasoning_tokens=(reasoning_tokens if "reasoning" in tokens else None),
+            cache_write_tokens=cache_write, consumed_tokens=total)
+
+
+def turn_token_events(database: Path | None, since: datetime | None = None):
+    """Pares (datetime_utc, tokens) por turno; mantém o contrato do backfill diário."""
+    for event in turn_usage_events(database, since):
+        yield event.at, event.consumed_tokens
 
 
 def count_active_12h(database: Path | None, now: datetime, window_s: float) -> int:

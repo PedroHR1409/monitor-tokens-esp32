@@ -75,6 +75,8 @@ DISMISS_FILE = Path(__file__).parent / ".dismissed.json"
 PERM_FILE = Path.home() / ".claude" / "monitor-ai-perm.json"
 CLAUDE_EVENT_FILE = Path.home() / ".claude" / "monitor-ai-events.json"
 SOURCE_STALE_AFTER_S = 90.0
+HOURLY_REFRESH_INTERVAL_S = 60.0
+_hourly_history_refresh: dict[Path, datetime] = {}
 
 # Quantos transcripts (mais recentes) inspecionar por ciclo. Ha ~65 sessoes; ler o
 # tail de todas a cada 5s seria desperdicio, e as antigas nunca ganhariam um card.
@@ -702,7 +704,8 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
                      codex_state_db: Path | None = None,
                      commandcode_dir: Path | None = None,
                      commandcode_ctx_window: int = 0,
-                     retention_days: int = usage_history.RETENTION_DAYS) -> dict:
+                     retention_days: int = usage_history.RETENTION_DAYS,
+                     hourly_retention_days: int = usage_history.HOURLY_RETENTION_DAYS) -> dict:
     """Payload legÃ­vel pelo firmware v1 durante a migraÃ§Ã£o do protocolo.
 
     `opencode_db=None` desliga a coleta do OpenCode (tests hermeticos); o daemon
@@ -799,6 +802,11 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
                                                  rollouts_dir=codex_rollouts_dir,
                                                  commandcode_dir=commandcode_dir,
                                                  retention_days=retention_days)
+        _record_hourly_history(
+            history_db, claude_dir, now, rollouts_dir=codex_rollouts_dir,
+            opencode_db=opencode_db, commandcode_dir=commandcode_dir,
+            retention_days=hourly_retention_days,
+            force_backfill=force_backfill)
         # ttl_s=None: caminho de producao do cache POR PERIODO (d1/d7/d30 com TTLs
         # proprios). Sem isto cai no caminho legado (um TTL para os tres periodos),
         # que reprocessa o d30 inteiro a cada 60s — medido em 42s com o volume atual
@@ -859,6 +867,37 @@ def _record_daily_history(history_db: Path, claude_dir: Path, tz: timezone,
     return {"daily": usage_history.daily_window(history_db, tz, now=now)}
 
 
+def _record_hourly_history(history_db: Path, claude_dir: Path, now: datetime, *,
+                           rollouts_dir: Path | None, opencode_db: Path | None,
+                           commandcode_dir: Path | None,
+                           retention_days: int = usage_history.HOURLY_RETENTION_DAYS,
+                           force_backfill: bool = False) -> None:
+    """Atualiza buckets horários no máximo por minuto, sem afetar o payload atual."""
+    observed = (now.replace(tzinfo=timezone.utc) if now.tzinfo is None
+                else now.astimezone(timezone.utc))
+    key = Path(history_db)
+    previous = _hourly_history_refresh.get(key)
+    try:
+        empty = usage_history.hourly_is_empty(key)
+        day_changed = previous is not None and previous.date() != observed.date()
+        if (not force_backfill and not empty and not day_changed and previous is not None
+                and (observed - previous).total_seconds() < HOURLY_REFRESH_INTERVAL_S):
+            return
+
+        # Marca a tentativa antes de ler as fontes para também limitar retries quando um
+        # arquivo de origem está temporariamente inacessível. O próximo ciclo tenta em 60s.
+        _hourly_history_refresh[key] = observed
+        days = (min(usage_history.WINDOW_DAYS, max(int(retention_days), 1))
+                if force_backfill or empty else 1)
+        usage_history.backfill_hourly(
+            key, claude_dir=claude_dir, rollouts_dir=rollouts_dir,
+            opencode_db=opencode_db, commandcode_dir=commandcode_dir,
+            now=observed, days=days)
+        usage_history.prune_hourly(key, keep_days=retention_days, now=observed)
+    except Exception as exc:
+        print(f"[daemon] histórico horário indisponível: {exc}", file=sys.stderr)
+
+
 # Compatibilidade para integraÃ§Ãµes Python existentes; o daemon usa os builders versionados.
 build_payload = build_payload_v1
 
@@ -878,7 +917,8 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
                      codex_state_db: Path | None = None,
                      commandcode_dir: Path | None = None,
                      commandcode_ctx_window: int = 0,
-                     retention_days: int = usage_history.RETENTION_DAYS) -> dict:
+                     retention_days: int = usage_history.RETENTION_DAYS,
+                     hourly_retention_days: int = usage_history.HOURLY_RETENTION_DAYS) -> dict:
     """Projeta os dados normalizados atuais no envelope estÃ¡vel do protocolo v2."""
     generated = now or datetime.now(timezone.utc)
     v1 = build_payload_v1(claude_dir, codex_index, max_sessions, tz, generated,
@@ -891,7 +931,8 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
                           codex_state_db=codex_state_db,
                           commandcode_dir=commandcode_dir,
                           commandcode_ctx_window=commandcode_ctx_window,
-                          retention_days=retention_days)
+                          retention_days=retention_days,
+                          hourly_retention_days=hourly_retention_days)
     legacy_stats = v1["stats"]
     series = collect_series(claude_dir, CODEX_SESSIONS, tz, generated)
     usage = {"series": [{"provider": item.provider, "buckets": dict(item.buckets),
@@ -1101,7 +1142,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                                        codex_state_db=codex_state_db,
                                        commandcode_dir=commandcode_dir,
                                        commandcode_ctx_window=commandcode_ctx,
-                                       retention_days=config.storage.retention_days)
+                                       retention_days=config.storage.retention_days,
+                                       hourly_retention_days=config.storage.hourly_retention_days)
             st = payload["stats"]
         else:
             sequence += 1
@@ -1117,7 +1159,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                 codex_state_db=codex_state_db,
                 commandcode_dir=commandcode_dir,
                 commandcode_ctx_window=commandcode_ctx,
-                retention_days=config.storage.retention_days)
+                retention_days=config.storage.retention_days,
+                hourly_retention_days=config.storage.hourly_retention_days)
             st = payload["stats"]["usage"]
         last_transport_epoch = refresh_transport_timestamp(
             payload, previous_epoch=last_transport_epoch)
