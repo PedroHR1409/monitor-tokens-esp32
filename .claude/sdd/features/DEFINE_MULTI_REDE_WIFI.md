@@ -1,6 +1,7 @@
 # DEFINE: Multi-rede WiFi (REDE_PRINCIPAL + HOTSPOT_CELULAR)
 
-> O painel alterna entre duas redes por prioridade, sem reflash a cada troca de Wi-Fi
+> O painel prioriza a rede principal e pode alternar para uma secundária opcional, sem
+> reflash a cada troca de Wi-Fi
 
 ## Metadata
 
@@ -9,7 +10,7 @@
 | **Feature** | MULTI_REDE_WIFI |
 | **Date** | 2026-09-21 |
 | **Author** | define-agent |
-| **Status** | ✅ Complete (Designed) |
+| **Status** | ✅ Complete (Built; optional secondary network and legacy secrets supported) |
 | **Clarity Score** | 15/15 |
 | **Input** | `.claude/sdd/features/BRAINSTORM_MULTI_REDE_WIFI.md` (`brainstorm_document`) |
 | **Roadmap** | fora do `docs/ROADMAP.md`; infraestrutura de bancada, não item de produto |

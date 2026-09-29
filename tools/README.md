@@ -45,6 +45,12 @@ Isso inclui homes isolados por hosts como o Orca. Sem essa variável, o padrão
 | `alert_severity.py` | severidade do alerta (`none`/`warning`/`critical`/`expired`) — função pura |
 | `notify.py` | toast nativo do SO por `subprocess` (PowerShell / `notify-send`) |
 
+O daemon usa `daemon.timezone` para fechar o dia e aceita `--tz-offset` como sobrescrita
+fixa. `--max-sessions` aceita de 1 a 6, que é o limite do firmware. Os valores
+`usage.claude_context_window` e `usage.claude_5h_budget` alimentam contexto e cota Claude;
+as variáveis legadas `MONITOR_CLAUDE_CONTEXT_WINDOW` e `MONITOR_CLAUDE_5H_BUDGET` têm
+precedência quando definidas. Os pódios de 7 e 30 dias incluem sessões já encerradas.
+
 ## Entrypoints de operação
 
 | Arquivo | Uso |

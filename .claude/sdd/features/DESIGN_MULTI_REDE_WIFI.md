@@ -1,7 +1,7 @@
 # DESIGN: Multi-rede WiFi (REDE_PRINCIPAL + HOTSPOT_CELULAR)
 
-> Duas credenciais com prioridade por ordem, orçamento de boot compartilhado e
-> alternância não-bloqueante no retry — mais o SSID saindo do scanner de segredos
+> Rede principal obrigatória e secundária opcional, com prioridade por ordem,
+> orçamento de boot compartilhado e retry não-bloqueante — mais o SSID fora do scanner
 
 ## Metadata
 
@@ -11,7 +11,7 @@
 | **Date** | 2026-09-21 |
 | **Author** | design-agent |
 | **DEFINE** | [DEFINE_MULTI_REDE_WIFI.md](./DEFINE_MULTI_REDE_WIFI.md) — clareza 15/15 |
-| **Status** | Ready for Build |
+| **Status** | Implemented; legado e rede secundária opcional ajustados em 2026-09-29 |
 | **Abordagem** | Approach A do brainstorm — tabela de credenciais + `WiFi.begin()` alternando |
 | **Confiança** | **0.80** — nenhuma KB cobre embedded/C++/WiFi; os padrões vêm do **codebase** (`session_transport.cpp`, `config.h`) e da API do core ESP32-Arduino, citados por arquivo e linha |
 

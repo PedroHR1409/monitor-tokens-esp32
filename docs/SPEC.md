@@ -136,16 +136,18 @@ Regras:
 
 ### Rede: duas credenciais, com a ordem como prioridade
 
-`include/secrets.h` declara **duas** redes (`WIFI_SSID`/`WIFI_PASSWORD` e
-`WIFI_SSID_2`/`WIFI_PASSWORD_2`). A **ordem no array é a prioridade**: o painel tenta a
-primeira e só cai para a segunda se ela não responder.
+`include/secrets.h` declara uma rede principal (`WIFI_SSID`/`WIFI_PASSWORD`) e uma rede
+secundária opcional (`WIFI_SSID_2`/`WIFI_PASSWORD_2`). Deixe o SSID secundário vazio para
+desativá-lo; builds também aceitam um `secrets.h` antigo sem as macros `_2`. A **ordem no
+array é a prioridade**: o painel tenta a principal e só cai para a secundária se ela não
+responder.
 
 Três regras fixadas:
 
 - **Orçamento de boot único.** `session_transport_init()` roda antes de
   `ui_dashboard_init()`, com a tela ainda preta. O relógio de `WIFI_CONNECT_TIMEOUT_MS`
-  (15s) é **compartilhado** entre as credenciais (≈7,5s cada), então o total nunca passa
-  de 15s — tentar cada rede por 15s viraria 30s de tela preta.
+  (15s) é **compartilhado** entre as credenciais configuradas, então o total nunca passa
+  de 15s. Sem rede secundária, a principal recebe o orçamento inteiro.
 - **Sem `scan`.** A escolha é por ordem, não por RSSI: nada de `WiFiMulti`/varredura no
   `loop()`, que apareceria como pico em `maxTransportMs` no `/diag` (o render é FULL).
 - **Alternância só após falha.** No retry de `WIFI_RETRY_INTERVAL_MS`, a credencial atual
@@ -650,8 +652,9 @@ procedencia antes de tratar um campo como fonte foi o que evitou o falso positiv
 Entao o maximo honesto e o CONSUMO somado dos transcripts na janela de 5h (a mesma
 janela curta do Codex, para os cards ficarem comparaveis). Consumo nao e cota: sem o
 teto do plano, um percentual teria denominador inventado. Por isso `pct` so e
-preenchido se `MONITOR_CLAUDE_5H_BUDGET` estiver declarado; sem ele o card mostra
-tokens absolutos. Com ele, o til de `~82%` permanece.
+preenchido se `usage.claude_5h_budget` estiver declarado em `monitor.toml` ou por
+`MONITOR_CLAUDE_5H_BUDGET` (que prevalece); sem teto o card mostra tokens absolutos.
+Com ele, o til de `~82%` permanece.
 
 ### Sinalizacao
 
@@ -958,6 +961,8 @@ registrada contra botao dedicado. Tocar arma o mudo; tocar de novo desarma.
 - A duracao vem do payload (`snooze_minutes`), nao de constante compilada — trocar o
   valor no `monitor.toml` nao pode exigir reflash. `SNOOZE_MINUTES_DEFAULT` e so o
   fallback para daemon legado.
+- A configuração aceita de 0 a 240 minutos; zero desativa o snooze. Valores acima de
+  240 são rejeitados pelo daemon antes de serem enviados ao firmware.
 
 ### Toast no PC
 
@@ -1025,6 +1030,11 @@ vai executar, de modo que um pedido pendente sem hook = aguardando aprovacao. Pa
 modo de falha nao ser pior que o problema, o `perm` inferido decai em
 `PERM_MARKER_MAX_AGE_S` (600s) — a mesma guarda de evidencia do modulo de estado. Sem
 evidencia, a sessao cai para recencia; nunca inventa `ask`/`perm`.
+
+Como nao existe `UserPromptSubmit`, uma mensagem conversacional mais nova que o ultimo
+evento invalida o estado antigo: um prompt novo depois de `Stop` volta a `work` pela
+recencia do transcript. Hooks mais recentes continuam vencendo; `ask` e `perm` mantem
+seus sinais e limites proprios.
 
 ### Tokens e contexto
 

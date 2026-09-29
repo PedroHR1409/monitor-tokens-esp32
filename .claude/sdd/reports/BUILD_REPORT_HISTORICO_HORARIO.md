@@ -9,7 +9,7 @@
 | Autor | codex |
 | DEFINE | [DEFINE_HISTORICO_HORARIO.md](../features/DEFINE_HISTORICO_HORARIO.md) |
 | DESIGN | [DESIGN_HISTORICO_HORARIO.md](../features/DESIGN_HISTORICO_HORARIO.md) |
-| Status | Implementação concluída; validação funcional pendente |
+| Status | Implementação concluída; validação funcional aprovada no follow-up de 2026-09-29 |
 
 ## Resumo
 
@@ -57,17 +57,20 @@ ausentes, mas não substituem dias ou horas já persistidos.
 |---|---|
 | Parse estático dos seis módulos Python alterados | Passou |
 | `git diff --check` | Passou |
-| Suíte funcional | Não executada nesta etapa |
-| Scanner de segredos | Não executado nesta etapa |
-| Firmware, painel e hardware | Fora do escopo |
+| Suíte funcional no build original | Não executada naquela etapa; follow-up posterior aprovado |
+| Scanner de segredos no build original | Não executado naquela etapa; follow-up posterior aprovado |
+| Firmware no build original | Fora do escopo daquela etapa; compilação posterior aprovada |
 
-Não foram adicionados nem executados testes. A validação funcional de idempotência,
-semântica dos quatro provedores, faixa UTC e prune continua pendente.
+Validação posterior executada em 2026-09-29 neste ramo: `python -m pytest tests/ -q`
+aprovou 309 testes e 36 subtestes; `python -m compileall -q tools tests` e
+`python tools/check_secrets.py` também passaram. A compilação de firmware foi executada
+com `python -m platformio run -e esp32-s3-3v5-lcd` e passou.
 
-## Próximo passo
+## Próximo uso
 
-Executar a validação funcional documentada no DESIGN antes de usar os buckets horários
-como entrada do item #3 do roadmap (custo por modelo).
+Os buckets horários podem seguir para o item #3 do roadmap (custo por modelo). A
+validação acima cobre os contratos automatizados; não substitui a validação física do
+painel.
 
 ## Correção de estabilidade após merge
 
