@@ -118,8 +118,10 @@ api_token = "toml-secret"
 
         cases = (
             ("[daemon]\nrole = 'peer'", "daemon.role"),
+            ('[daemon]\ntimezone = "Mars/Olympus"', "daemon.timezone"),
             ("[device]\nport = 0", "device.port"),
             ("[alerts]\nwarning_after_s = 120\ncritical_after_s = 60", "critical_after_s"),
+            ("[alerts]\nsnooze_minutes = 241", "snooze_minutes"),
             ("[transport]\ntimeout_s = 0", "transport.timeout_s"),
         )
         with tempfile.TemporaryDirectory() as tmp:

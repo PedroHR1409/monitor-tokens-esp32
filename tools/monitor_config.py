@@ -12,6 +12,7 @@ from pathlib import Path
 import sys
 import tomllib
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 CONFIG_SECTIONS = frozenset({
@@ -190,7 +191,7 @@ api_token = \"\"
 [alerts]
 # warning_after_s = 90
 # critical_after_s = 300
-# snooze_minutes = 15
+# snooze_minutes = 15  # 0 desativa; faixa válida: 0..240
 
 [service]
 # enabled = false
@@ -277,6 +278,10 @@ def _validate(config: MonitorConfig) -> None:
         raise ValueError("daemon.role must be standalone, satellite, or aggregator")
     _positive_number(config.daemon.interval_s, "daemon.interval_s")
     _non_empty_string(config.daemon.timezone, "daemon.timezone")
+    try:
+        ZoneInfo(config.daemon.timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError("daemon.timezone must be a valid IANA timezone") from None
     _non_empty_string(config.device.host, "device.host")
     if not isinstance(config.device.port, int) or isinstance(config.device.port, bool) \
             or not 1 <= config.device.port <= 65535:
@@ -298,6 +303,8 @@ def _validate(config: MonitorConfig) -> None:
     _non_negative_int(config.alerts.warning_after_s, "alerts.warning_after_s")
     _non_negative_int(config.alerts.critical_after_s, "alerts.critical_after_s")
     _non_negative_int(config.alerts.snooze_minutes, "alerts.snooze_minutes")
+    if config.alerts.snooze_minutes > 240:
+        raise ValueError("alerts.snooze_minutes must be between 0 and 240")
     if config.alerts.critical_after_s < config.alerts.warning_after_s:
         raise ValueError("alerts.critical_after_s must not precede warning_after_s")
     if not isinstance(config.service.enabled, bool):
