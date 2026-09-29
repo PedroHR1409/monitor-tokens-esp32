@@ -34,12 +34,14 @@ horária e o custo do item #3 do roadmap.
 | MUST | Representar categoria não observável como `NULL`; total consumido permanece inteiro não negativo |
 | MUST | Aplicar `storage.hourly_retention_days` (default 365) sem alterar `storage.retention_days` da tabela diária |
 | MUST | Reprocessar eventos de forma idempotente e manter intactos a tabela diária e o payload atual |
+| MUST | Backfill automático só preenche dias/buckets fechados ausentes; registros existentes são imutáveis e somente o período corrente é recalculado |
 | SHOULD | Expor uma consulta Python ordenada por hora para consumidores futuros |
 
 ## Critérios de sucesso
 
 - Cada chave `(hora UTC, provedor, modelo)` tem no máximo uma linha.
 - Reprocessar os mesmos eventos produz os mesmos valores, sem duplicação.
+- Reiniciar o daemon não altera registros de dias/horas fechados que já estavam persistidos.
 - Soma dos `consumed_tokens` dos eventos reproduz o total atual por provedor, sem contar cache.read como consumo novo.
 - Uma categoria ausente na fonte aparece como `NULL`, nunca como zero inventado.
 - Prune remove buckets mais antigos que a retenção configurada; o prune diário continua obedecendo sua configuração atual.

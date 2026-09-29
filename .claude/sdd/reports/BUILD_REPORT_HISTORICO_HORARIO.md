@@ -17,7 +17,8 @@ Foi adicionada a tabela SQLite `usage_history_hourly`, com agregação UTC por p
 modelo e breakdown nullable. Os coletores de Claude, Codex, OpenCode e Command Code
 fornecem eventos detalhados; o daemon atualiza a janela atual no máximo a cada minuto e
 aplica `storage.hourly_retention_days`. A tabela diária, o payload HTTP e o firmware
-permanecem compatíveis.
+permanecem compatíveis. Backfills de reinicialização preenchem períodos fechados
+ausentes, mas não substituem dias ou horas já persistidos.
 
 | Métrica | Resultado |
 |---|---|
@@ -67,3 +68,11 @@ semântica dos quatro provedores, faixa UTC e prune continua pendente.
 
 Executar a validação funcional documentada no DESIGN antes de usar os buckets horários
 como entrada do item #3 do roadmap (custo por modelo).
+
+## Correção de estabilidade após merge
+
+O primeiro ciclo do daemon usava `replace_existing=True` no backfill diário. Como o
+backfill parte apenas dos arquivos ainda disponíveis, reiniciar podia substituir os
+totais de dias anteriores por uma leitura parcial. O daemon agora usa inserção apenas
+para dias ausentes. No histórico horário, somente a hora UTC corrente é atualizada por
+upsert; horas fechadas preservam os valores existentes.

@@ -1083,7 +1083,10 @@ a semantica de consumo ja usada por cada coletor e exclui `cache.read`.
 O backfill usa eventos brutos disponiveis, cobre no maximo os ultimos 30 dias e e
 idempotente. O daemon reprocessa a janela do dia atual no maximo uma vez por minuto.
 Buckets sem evento em uma leitura nao sao apagados, pois a fonte pode ter sido
-rotacionada. `storage.hourly_retention_days` (default 365) controla o prune dessa
+rotacionada. Em reinicializacoes, o backfill so preenche buckets historicos ausentes;
+horas fechadas nao sao substituidas. Apenas a hora UTC corrente e atualizada com novos
+dados; o historico diario so atualiza o dia local corrente. `storage.hourly_retention_days`
+(default 365) controla o prune dessa
 tabela; `storage.retention_days` continua controlando somente `usage_history`.
 `usage_history.hourly_range(start, end)` expoe consulta ordenada em intervalo UTC
 semiaberto `[start, end)`. O payload e o firmware v1 nao mudam.
