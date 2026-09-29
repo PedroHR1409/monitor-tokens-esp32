@@ -68,11 +68,12 @@ class ProductionContractsTests(unittest.TestCase):
 
     def test_secrets_example_declares_a_second_network(self):
         """O exemplo versionado e o contrato de formato das duas redes; sem as chaves
-        _2, quem clona nao descobre que a alternancia existe."""
+        _2, quem clona nao descobre que a alternancia existe. A rede extra fica
+        realmente desativada por padrao, sem dividir o tempo de boot."""
         example = ROOT / "include" / "secrets.example.h"
         text = example.read_text(encoding="utf-8") if example.is_file() else ""
-        self.assertIn("WIFI_SSID_2", text)
-        self.assertIn("WIFI_PASSWORD_2", text)
+        self.assertRegex(text, r'(?m)^#define\s+WIFI_SSID_2\s+""\s*$')
+        self.assertRegex(text, r'(?m)^#define\s+WIFI_PASSWORD_2\s+""\s*$')
 
     def test_default_build_does_not_enable_demo_data(self):
         config = (ROOT / "include" / "config.h").read_text(encoding="utf-8")

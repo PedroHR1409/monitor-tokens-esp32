@@ -67,9 +67,9 @@ para não invalidar tela).
 - [ ] Sem nenhuma rede no alcance, o dashboard sobe em **≤15s**; o serial imprime `IP=sem WiFi`
 - [ ] Após queda de rede, reconecta sozinho em ≤ **20s** (`WIFI_RETRY_INTERVAL_MS`), alternando entre as duas
 - [ ] `monitor-ai.local` resolve na rede ativa e `GET /health` responde **sem** editar `monitor.toml`
-- [ ] `python tools/check_secrets.py` cobre os **4** valores; **0** senhas em arquivos rastreados
-- [ ] Build com `secrets.example.h` (sem `secrets.h`) segue **SUCCESS** — o CI não quebra
-- [ ] `python -m pytest tests/ -q` verde, incluindo `test_production_contracts`
+- [x] `python tools/check_secrets.py` cobre os **4** valores; **0** senhas em arquivos rastreados
+- [x] Build com `secrets.example.h` (sem `secrets.h`) segue **SUCCESS** — CI e PlatformIO passaram
+- [x] `python -m pytest tests/ -q` verde, incluindo `test_production_contracts`
 - [ ] `GET /diag` não mostra regressão em `maxTransportMs`/`maxLoopMs` em relação ao valor anterior
 
 ---

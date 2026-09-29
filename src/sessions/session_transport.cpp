@@ -636,9 +636,8 @@ void session_transport_init() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
 
-    // Um relogio so para as duas redes: ui_dashboard_init() roda DEPOIS daqui, entao
-    // 15s por credencial virariam 30s de tela preta. O orcamento e dividido pelo numero
-    // de credenciais, entao o total nunca passa de WIFI_CONNECT_TIMEOUT_MS.
+    // Um relogio compartilhado limita a tela preta. Uma segunda credencial vazia
+    // nao consome metade do orcamento de boot.
     const uint32_t start = millis();
     const uint32_t perCredential = WIFI_CONNECT_TIMEOUT_MS / WIFI_CREDENTIAL_COUNT;
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {

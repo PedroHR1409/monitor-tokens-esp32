@@ -6,7 +6,7 @@
 #define WIFI_PASSWORD "SENHA_DA_REDE"
 // Rede secundaria opcional: deixe os dois campos vazios se nao for usada.
 // A rede principal continua sendo a primeira prioridade.
-#define WIFI_SSID_2     "NOME_DA_REDE_2"
-#define WIFI_PASSWORD_2 "SENHA_DA_REDE_2"
+#define WIFI_SSID_2     ""
+#define WIFI_PASSWORD_2 ""
 // Curto de proposito: o fallback sem secrets.h nao aceita chamadas autenticadas.
 #define MONITOR_API_TOKEN "CONFIGURE"
