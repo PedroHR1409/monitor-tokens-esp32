@@ -16,9 +16,10 @@ A assimetria entre os dois e o ponto central deste modulo, e ela e real:
   saber o teto do plano, virar percentual seria inventar denominador.
 
 Por isso o percentual do Claude so aparece se voce declarar o teto em
-`MONITOR_CLAUDE_5H_BUDGET` (tokens na janela de 5h). Sem ele, o valor vai como
-tokens absolutos e a tela rotula "estimado". Um numero calibrado por voce continua
-sendo estimativa, mas pelo menos e uma estimativa cujo denominador voce escolheu.
+`usage.claude_5h_budget` no `monitor.toml` ou em `MONITOR_CLAUDE_5H_BUDGET`
+(tokens na janela de 5h; a variavel prevalece). Sem ele, o valor vai como tokens
+absolutos e a tela rotula "estimado". Um numero calibrado por voce continua sendo
+estimativa, mas pelo menos e uma estimativa cujo denominador voce escolheu.
 
 Janela de 5h: e a janela curta do Codex (`window_minutes == 300`) e a mesma cadencia
 do bloco do Claude, o que deixa os dois cards comparaveis lado a lado.
@@ -54,12 +55,13 @@ CLAUDE_WINDOW_H = 5
 CLAUDE_WINDOW_S = CLAUDE_WINDOW_H * 3600
 
 
-def claude_budget() -> int:
-    """Teto de tokens da janela de 5h declarado pelo usuario. 0 = nao declarado."""
+def claude_budget(configured: int = 0) -> int:
+    """Environment override, then monitor.toml; 0 means no declared budget."""
     try:
-        return max(0, int(os.environ.get("MONITOR_CLAUDE_5H_BUDGET", "0")))
+        raw = os.environ.get("MONITOR_CLAUDE_5H_BUDGET", "").strip()
+        return max(0, int(raw)) if raw else max(0, int(configured))
     except ValueError:
-        return 0
+        return max(0, int(configured))
 
 
 def _empty_codex() -> dict:
@@ -239,11 +241,13 @@ def claude_consumption(projects_dir: Path, now: datetime | None = None,
 def collect(projects_dir: Path, now: datetime | None = None,
             sessions_dir: Path | None = None,
             opencode_db: Path | None = None,
-            commandcode_dir: Path | None = None) -> dict:
+            commandcode_dir: Path | None = None,
+            claude_5h_budget: int = 0) -> dict:
     """Bloco `quota` do payload: o oficial e o estimado, cada um marcado como tal."""
     now = now or datetime.now(timezone.utc)
     cx = codex_quota(sessions_dir, now)
-    cl = claude_consumption(projects_dir, now)
+    cl = claude_consumption(projects_dir, now,
+                            budget=claude_budget(claude_5h_budget))
     oc_since = (now - timedelta(seconds=CLAUDE_WINDOW_S)).timestamp()
     # opencode_db/commandcode_dir=None desliga a coleta (teste hermetico); o daemon
     # passa os caminhos reais.

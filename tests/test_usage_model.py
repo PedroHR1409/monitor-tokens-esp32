@@ -65,6 +65,24 @@ class ContextMeasurementTests(unittest.TestCase):
         self.assertEqual({"tokens": 62_500, "limit": None, "pct": 0, "quality": "unknown"},
                          measurement)
 
+    def test_claude_context_uses_configured_window_when_transcript_has_no_limit(self):
+        transcript = [{"message": {"usage": {"input_tokens": 50_000}}}]
+
+        with patch.dict("os.environ", {"MONITOR_CLAUDE_CONTEXT_WINDOW": ""}):
+            measurement = context_usage(transcript, configured_window=100_000)
+
+        self.assertEqual({"tokens": 50_000, "limit": 100_000, "pct": 50,
+                          "quality": "configured"}, measurement)
+
+    def test_legacy_context_environment_override_precedes_toml(self):
+        transcript = [{"message": {"usage": {"input_tokens": 50_000}}}]
+
+        with patch.dict("os.environ", {"MONITOR_CLAUDE_CONTEXT_WINDOW": "200000"}):
+            measurement = context_usage(transcript, configured_window=100_000)
+
+        self.assertEqual(25, measurement["pct"])
+        self.assertEqual(200_000, measurement["limit"])
+
 
 if __name__ == "__main__":
     unittest.main()

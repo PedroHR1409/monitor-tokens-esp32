@@ -185,7 +185,7 @@ def _codex(index_path: Path, since: datetime, tz: timezone,
         from session_meta import _rollout_for
         candidates = []
         for tid, obj in latest.items():
-            path = _rollout_for(str(tid))
+            path = _rollout_for(str(tid), rollouts_dir)
             try:
                 fresco = path is None or path.stat().st_mtime >= since.timestamp()
             except OSError:
@@ -194,7 +194,7 @@ def _codex(index_path: Path, since: datetime, tz: timezone,
                 candidates.append((tid, obj))
 
     for tid, obj in candidates:
-        meta = codex_meta(str(tid), since)
+        meta = codex_meta(str(tid), since, rollouts_dir=rollouts_dir)
         tokens = meta["tokens"]
         if tokens <= 0:
             continue
@@ -215,7 +215,8 @@ def _opencode(opencode_db: Path | None, since: datetime, tz: timezone,
     # ja encerradas.
     from opencode_sessions import turn_token_events
     total = sum(tokens for _, tokens in turn_token_events(opencode_db, since))
-    sessions = scan_opencode_sessions(now, token_since=since, database=opencode_db)
+    sessions = scan_opencode_sessions(now, token_since=since, database=opencode_db,
+                                      include_old=True)
     entries = [{"id": s["id"], "name": s["project"], "tokens": s["tokensWin"]}
                for s in sessions]
     return _entry(total, entries, top_n)
@@ -229,7 +230,8 @@ def _commandcode(projects_dir: Path | None, since: datetime, tz: timezone,
     # mesmo quando ja nao devem ocupar um card ao vivo.
     from commandcode_sessions import turn_token_events
     total = sum(tokens for _, tokens in turn_token_events(projects_dir, since))
-    sessions = scan_commandcode_sessions(now, token_since=since, directory=projects_dir)
+    sessions = scan_commandcode_sessions(now, token_since=since, directory=projects_dir,
+                                         include_old=True)
     entries = [{"id": s["id"], "name": s["project"], "tokens": s["tokensWin"]}
                for s in sessions]
     return _entry(total, entries, top_n)

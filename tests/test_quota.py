@@ -7,11 +7,13 @@ bucket null — ler pela posicao daria 5h quando era semanal.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -237,6 +239,16 @@ class ClaudeEstimateTests(unittest.TestCase):
 
 
 class QuotaBlockTests(unittest.TestCase):
+    def test_collect_uses_configured_claude_budget(self):
+        with TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "claude"
+            write_transcript(projects, "proj-a", [turn(NOW, 90_000)])
+            with patch.dict(os.environ, {"MONITOR_CLAUDE_5H_BUDGET": ""}):
+                result = quota.collect(projects, NOW,
+                                      sessions_dir=Path(tmp) / "missing-codex",
+                                      claude_5h_budget=200_000)
+        self.assertEqual(45, result["claude"]["pct"])
+
     def test_block_marks_which_number_is_official(self):
         """A assimetria e o ponto: o firmware rotula a tela a partir destes flags, e
         um deles nunca pode virar True por acidente."""

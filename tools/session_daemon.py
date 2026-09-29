@@ -26,6 +26,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from session_state import (PERM_MARKER_MAX_AGE_S, WORK_MAX_AGE_S,
                            conversational_events, infer_state,
@@ -290,7 +291,8 @@ def project_name_of(objs: list, fallback: str, limit: int = NAME_MAX) -> str:
 
 def scan_claude_sessions(projects_dir: Path, now: datetime,
                          event_path: Path | None = None,
-                         legacy_perm_path: Path | None = None) -> list:
+                         legacy_perm_path: Path | None = None,
+                         context_window: int = 0) -> list:
     """Uma entrada por SESSAO (arquivo .jsonl), nao por projeto — o mesmo projeto
     pode aparecer em mais de um card se tiver varias sessoes abertas."""
     if not projects_dir.is_dir():
@@ -379,7 +381,7 @@ def scan_claude_sessions(projects_dir: Path, now: datetime,
         project_raw = project_name_of(objs, folder, limit=FULL_NAME_MAX)
         full = session_display_name(project_raw, branch)
         tokens_win = session_tokens(path, now - timedelta(seconds=SESSION_TOKEN_WINDOW_S))
-        context = context_usage(objs)
+        context = context_usage(objs, context_window)
         results.append({
             "id": session_id,
             "project": full,
@@ -501,7 +503,7 @@ def scan_codex_sessions(index_path: Path, now: datetime,
         # estruturado mais recente continua sendo a fonte autoritativa.
         # O indice do Codex so tem id/nome/updated_at; modelo, effort, cwd e uso de
         # tokens estao no rollout da sessao, que casa pelo id.
-        cx = codex_meta(tid, token_since)
+        cx = codex_meta(tid, token_since, rollouts_dir=rollouts_dir)
         thread = thread_rows.get(tid, {})
         cwd = cx["cwd"] or thread.get("cwd", "")
         branch = strip_accents(read_git_branch(cwd))[:20]
@@ -704,6 +706,8 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
                      codex_state_db: Path | None = None,
                      commandcode_dir: Path | None = None,
                      commandcode_ctx_window: int = 0,
+                     claude_context_window: int = 0,
+                     claude_5h_budget: int = 0,
                      retention_days: int = usage_history.RETENTION_DAYS,
                      hourly_retention_days: int = usage_history.HOURLY_RETENTION_DAYS) -> dict:
     """Payload legÃ­vel pelo firmware v1 durante a migraÃ§Ã£o do protocolo.
@@ -713,12 +717,15 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
     desliga o historico diario pelos mesmos motivos; com caminho, o total do dia
     (3 fontes) e persistido e `stats.history.daily` entra como campo aditivo."""
     now = now or datetime.now(timezone.utc)
+    if not 1 <= max_sessions <= MAX_SESSIONS:
+        raise ValueError("max_sessions must be between 1 and {}".format(MAX_SESSIONS))
     dismissed = load_dismissed()
     hidden = hidden or set()
     pinned = pinned or set()
 
     token_since = now - timedelta(seconds=SESSION_TOKEN_WINDOW_S)
-    todas = (scan_claude_sessions(claude_dir, now)
+    todas = (scan_claude_sessions(claude_dir, now,
+                                  context_window=claude_context_window)
              + scan_codex_sessions(codex_index, now, token_since,
                                    rollouts_dir=codex_rollouts_dir,
                                    state_db=codex_state_db))
@@ -792,7 +799,9 @@ def build_payload_v1(claude_dir: Path, codex_index: Path, max_sessions: int,
         "token_window_h": SESSION_TOKEN_WINDOW_H,
         "total_sessions": total,
         "quota": collect_quota(claude_dir, now, opencode_db=opencode_db,
-                               commandcode_dir=commandcode_dir),
+                               commandcode_dir=commandcode_dir,
+                               sessions_dir=codex_rollouts_dir,
+                               claude_5h_budget=claude_5h_budget),
     }
     if history_db is not None:
         stats["history"] = _record_daily_history(history_db, claude_dir, tz, now,
@@ -846,7 +855,7 @@ def _record_daily_history(history_db: Path, claude_dir: Path, tz: timezone,
     pelo backfill sem sobrescrever os que ja existem."""
     from usage_tracker import codex_series
 
-    codex = codex_series(CODEX_SESSIONS, tz, now)
+    codex = codex_series(rollouts_dir or CODEX_SESSIONS, tz, now)
     codex_today = codex.total if codex else 0
     day_start = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
     opencode_today = (window_tokens(opencode_db, day_start.timestamp())
@@ -919,6 +928,8 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
                      codex_state_db: Path | None = None,
                      commandcode_dir: Path | None = None,
                      commandcode_ctx_window: int = 0,
+                     claude_context_window: int = 0,
+                     claude_5h_budget: int = 0,
                      retention_days: int = usage_history.RETENTION_DAYS,
                      hourly_retention_days: int = usage_history.HOURLY_RETENTION_DAYS) -> dict:
     """Projeta os dados normalizados atuais no envelope estÃ¡vel do protocolo v2."""
@@ -933,10 +944,13 @@ def build_payload_v2(claude_dir: Path, codex_index: Path, max_sessions: int,
                           codex_state_db=codex_state_db,
                           commandcode_dir=commandcode_dir,
                           commandcode_ctx_window=commandcode_ctx_window,
+                          claude_context_window=claude_context_window,
+                          claude_5h_budget=claude_5h_budget,
                           retention_days=retention_days,
                           hourly_retention_days=hourly_retention_days)
     legacy_stats = v1["stats"]
-    series = collect_series(claude_dir, CODEX_SESSIONS, tz, generated)
+    series = collect_series(claude_dir, codex_rollouts_dir or CODEX_SESSIONS,
+                            tz, generated)
     usage = {"series": [{"provider": item.provider, "buckets": dict(item.buckets),
                            "total": item.total, "quality": item.quality}
                           for item in series],
@@ -1032,14 +1046,25 @@ def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--commandcode-projects", default=None,
                     help="diretorio dos transcripts do Command Code "
                          "(padrao: ~/.commandcode/projects)")
-    ap.add_argument("--max-sessions", type=int, default=MAX_SESSIONS)
-    ap.add_argument("--tz-offset", type=float, default=-3.0,
-                    help="fuso para o corte do dia (padrao -3 = horario de Brasilia)")
+    ap.add_argument("--max-sessions", type=_max_sessions, default=MAX_SESSIONS,
+                    help="sessoes exibidas no painel (1 a {})".format(MAX_SESSIONS))
+    ap.add_argument("--tz-offset", type=float, default=None,
+                    help="sobrescreve daemon.timezone com um deslocamento UTC fixo")
     ap.add_argument("--protocol", type=int, choices=(1, 2), default=1,
                     help="versao do payload (padrao: 1, a unica servida pelo firmware "
                          "atual; use 2 quando o endpoint /api/v2/snapshot existir)")
     ap.add_argument("--once", action="store_true")
     return ap
+
+
+def _max_sessions(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("deve ser um inteiro") from None
+    if not 1 <= parsed <= MAX_SESSIONS:
+        raise argparse.ArgumentTypeError("deve estar entre 1 e {}".format(MAX_SESSIONS))
+    return parsed
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1048,15 +1073,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return add_arguments(ap).parse_args(argv)
 
 
+def _resolve_timezone(args: argparse.Namespace, config: MonitorConfig):
+    offset = getattr(args, "tz_offset", None)
+    return (timezone(timedelta(hours=offset)) if offset is not None
+            else ZoneInfo(config.daemon.timezone))
+
+
 def run(args: argparse.Namespace, config: MonitorConfig) -> int:
     """Run the daemon from parsed options and one immutable config snapshot."""
+    if not 1 <= getattr(args, "max_sessions", MAX_SESSIONS) <= MAX_SESSIONS:
+        print("[daemon] --max-sessions deve estar entre 1 e {}".format(MAX_SESSIONS),
+              file=sys.stderr)
+        return 2
     host = args.host if args.host is not None else config.device.host
     port = args.port if args.port is not None else config.device.port
     interval = args.interval if args.interval is not None else config.daemon.interval_s
 
     base = "http://{}:{}".format(host, port)
     url = base + ("/api/v2/snapshot" if args.protocol == 2 else "/sessions")
-    tz = timezone(timedelta(hours=args.tz_offset))
+    tz_offset = getattr(args, "tz_offset", None)
+    tz = _resolve_timezone(args, config)
+    tz_label = ("UTC{:+g}".format(tz_offset) if tz_offset is not None
+                else config.daemon.timezone)
     claude_dir, codex_index = Path(args.claude_dir), Path(args.codex_index)
     node_id = os.environ.get("MONITOR_NODE_ID", "").strip() or os.environ.get("COMPUTERNAME", "monitor")
     device_id = os.environ.get("MONITOR_DEVICE_ID", "").strip() or host
@@ -1064,8 +1102,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
     daemon_instance_id = "{}-{}".format(node_id, uuid.uuid4().hex)
     sequence = 0
 
-    print("[daemon] Monitor.AI -> {} a cada {}s (dia em UTC{:+g}, board = ultimas {:.0f}h)"
-          .format(url, interval, args.tz_offset, BOARD_WINDOW_S / 3600))
+    print("[daemon] Monitor.AI -> {} a cada {}s (dia em {}, board = ultimas {:.0f}h)"
+          .format(url, interval, tz_label, BOARD_WINDOW_S / 3600))
     print("[daemon] CODEX_HOME={}".format(CODEX_HOME))
 
     # Guarda de instancia unica: dois daemons postando no mesmo segundo geram o
@@ -1144,6 +1182,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                                        codex_state_db=codex_state_db,
                                        commandcode_dir=commandcode_dir,
                                        commandcode_ctx_window=commandcode_ctx,
+                                       claude_context_window=config.usage.claude_context_window,
+                                       claude_5h_budget=config.usage.claude_5h_budget,
                                        retention_days=config.storage.retention_days,
                                        hourly_retention_days=config.storage.hourly_retention_days)
             st = payload["stats"]
@@ -1161,6 +1201,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                 codex_state_db=codex_state_db,
                 commandcode_dir=commandcode_dir,
                 commandcode_ctx_window=commandcode_ctx,
+                claude_context_window=config.usage.claude_context_window,
+                claude_5h_budget=config.usage.claude_5h_budget,
                 retention_days=config.storage.retention_days,
                 hourly_retention_days=config.storage.hourly_retention_days)
             st = payload["stats"]["usage"]
@@ -1189,6 +1231,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                                            snooze_minutes=snooze_minutes,
                                            codex_rollouts_dir=codex_rollouts_dir,
                                            codex_state_db=codex_state_db,
+                                           claude_context_window=config.usage.claude_context_window,
+                                           claude_5h_budget=config.usage.claude_5h_budget,
                                            retention_days=config.storage.retention_days)
                 st = payload["stats"]
             else:
@@ -1199,6 +1243,8 @@ def run(args: argparse.Namespace, config: MonitorConfig) -> int:
                     thresholds=limiares, snooze_minutes=snooze_minutes,
                     codex_rollouts_dir=codex_rollouts_dir,
                     codex_state_db=codex_state_db,
+                    claude_context_window=config.usage.claude_context_window,
+                    claude_5h_budget=config.usage.claude_5h_budget,
                     retention_days=config.storage.retention_days)
                 st = payload["stats"]["usage"]
             today_tokens = usage_total_for_log(st)

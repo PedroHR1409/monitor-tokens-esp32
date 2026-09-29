@@ -319,6 +319,19 @@ class PayloadIntegrationTests(unittest.TestCase):
         self.assertEqual(123, history["daily"][28])  # dia fechado preservado
         self.assertEqual(999, history["daily"][29])  # dia corrente atualizado
 
+    def test_daily_history_uses_custom_codex_rollouts_directory(self):
+        import session_daemon
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rollouts = root / "custom-codex" / "sessions"
+            _write_rollout(rollouts, "rollout-custom.jsonl", [
+                (NOW - timedelta(hours=1), 200), (NOW, 500)])
+            history = session_daemon._record_daily_history(
+                root / "history.db", root / "claude", TZ, NOW, 0,
+                opencode_db=None, force_backfill=True, rollouts_dir=rollouts,
+                commandcode_dir=None)
+        self.assertEqual(500, history["daily"][-1])
+
     def test_v2_projects_history_block(self):
         import session_daemon
         with tempfile.TemporaryDirectory() as tmp:

@@ -168,6 +168,46 @@ class CollectorTests(unittest.TestCase):
         self.assertNotIn("cc-ended", ids)
         self.assertEqual("free", next(s for s in sessions if s["id"] == "cc-free")["state"])
 
+    def test_new_user_message_supersedes_an_older_stop_event(self):
+        """A new prompt has no hook event; an older Stop must not leave it as free."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, "proj", "cc-resumed", [
+                _header("cc-resumed", str(root / "proj"), NOW - timedelta(seconds=30)),
+                _assistant(NOW - timedelta(seconds=15), message_id="m1", content=[]),
+                _user("continue", NOW - timedelta(seconds=2), "m2"),
+            ], mtime=NOW - timedelta(seconds=2))
+            events = root / "events.json"
+            _write_events(events, {
+                "cc-resumed": {"session_id": "cc-resumed", "state": "free",
+                               "timestamp": _iso(NOW - timedelta(seconds=8)),
+                               "event": "Stop", "tool": "", "cwd": ""},
+            })
+            sessions = commandcode_sessions.scan_commandcode_sessions(
+                NOW, NOW - timedelta(hours=12), directory=root, event_path=events)
+        self.assertEqual(1, len(sessions))
+        self.assertEqual("work", sessions[0]["state"])
+
+    def test_new_prompt_after_session_end_reopens_transcript_state(self):
+        """SessionEnd only wins until the transcript records a later conversation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, "proj", "cc-reopened", [
+                _header("cc-reopened", str(root / "proj"), NOW - timedelta(seconds=30)),
+                _assistant(NOW - timedelta(seconds=15), message_id="m1", content=[]),
+                _user("continue", NOW - timedelta(seconds=2), "m2"),
+            ], mtime=NOW - timedelta(seconds=2))
+            events = root / "events.json"
+            _write_events(events, {
+                "cc-reopened": {"session_id": "cc-reopened", "state": "ended",
+                                "timestamp": _iso(NOW - timedelta(seconds=8)),
+                                "event": "SessionEnd", "tool": "", "cwd": ""},
+            })
+            sessions = commandcode_sessions.scan_commandcode_sessions(
+                NOW, NOW - timedelta(hours=12), directory=root, event_path=events)
+        self.assertEqual(1, len(sessions))
+        self.assertEqual("work", sessions[0]["state"])
+
     def test_consumption_is_input_minus_cache_read_and_dedups(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -225,6 +265,20 @@ class CollectorTests(unittest.TestCase):
                 NOW, NOW - timedelta(hours=26), directory=root,
                 event_path=root / "missing-events.json")
         self.assertEqual([], sessions)
+
+    def test_historical_scan_keeps_old_session_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, "proj", "cc-history", [
+                _header("cc-history", str(root / "proj"), NOW - timedelta(days=2)),
+                _assistant(NOW - timedelta(days=2), message_id="m1", content=[],
+                           input_tokens=1200, output_tokens=50, cache_read=200),
+            ], mtime=NOW - timedelta(days=2))
+            sessions = commandcode_sessions.scan_commandcode_sessions(
+                NOW, NOW - timedelta(days=7), directory=root,
+                event_path=root / "missing-events.json", include_old=True)
+        self.assertEqual(1, len(sessions))
+        self.assertEqual(1050, sessions[0]["tokensWin"])
 
     def test_missing_directory_degrades_to_empty(self):
         self.assertEqual([], commandcode_sessions.scan_commandcode_sessions(
