@@ -49,6 +49,27 @@ class TransportTimestampTests(unittest.TestCase):
         self.assertEqual(expected, payload["generated_at_epoch_ms"])
 
 
+class DaemonOptionTests(unittest.TestCase):
+    def test_configured_timezone_is_used_when_no_cli_offset_is_given(self):
+        config = MonitorConfig.load("missing-monitor.toml", environ={})
+        resolved = session_daemon._resolve_timezone(SimpleNamespace(tz_offset=None), config)
+        self.assertEqual("America/Sao_Paulo", resolved.key)
+
+    def test_cli_timezone_offset_overrides_configured_timezone(self):
+        config = MonitorConfig.load("missing-monitor.toml", environ={})
+        resolved = session_daemon._resolve_timezone(SimpleNamespace(tz_offset=0.0), config)
+        self.assertEqual(0, resolved.utcoffset(None).total_seconds())
+
+    def test_max_sessions_cannot_exceed_firmware_capacity(self):
+        with self.assertRaises(SystemExit):
+            session_daemon.parse_args(["--max-sessions", "7"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "between 1 and 6"):
+                session_daemon.build_payload_v1(
+                    root / "claude", root / "index", 7, timezone.utc, now=NOW)
+
+
 class CodexClassificationTests(unittest.TestCase):
     def write_index(self, directory: Path, entries: list[dict]) -> Path:
         path = directory / "session_index.jsonl"
@@ -379,6 +400,30 @@ class PayloadFreshnessTests(unittest.TestCase):
         self.assertIsNone(session["ctxPct"])
         self.assertEqual({"value": None, "quality": "unknown", "unit": "percent"},
                          session["context"])
+
+    def test_v2_uses_the_configured_claude_context_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "claude" / "project"
+            project.mkdir(parents=True)
+            transcript = {
+                "type": "assistant", "sessionId": "claude-context-configured",
+                "timestamp": NOW.isoformat(), "cwd": str(root / "project"),
+                "message": {"model": "claude-test", "content": [],
+                            "usage": {"input_tokens": 50_000}},
+            }
+            (project / "session.jsonl").write_text(json.dumps(transcript) + "\n",
+                                                    encoding="utf-8")
+            with patch.dict(os.environ, {"MONITOR_CLAUDE_CONTEXT_WINDOW": ""}):
+                payload = session_daemon.build_payload_v2(
+                    root / "claude", root / "missing-index", 6, timezone.utc,
+                    node_id="office-node", device_id="desk-display",
+                    daemon_instance_id="daemon-18", sequence=10, now=NOW,
+                    claude_context_window=100_000)
+        session = payload["sessions"][0]
+        self.assertIsNone(session["ctxPct"])
+        self.assertEqual(50, session["context"]["value"])
+        self.assertEqual("configured", session["context"]["quality"])
 
     def test_default_v2_main_posts_series_payload_without_legacy_tokens_today(self):
         """Reading a v1-only total after POST would crash the default v2 daemon loop."""

@@ -830,3 +830,9 @@ never assume PASS on exit 2"*.
 ## Next Step
 
 **Ready for:** `/ship .claude/sdd/features/DEFINE_COMMANDCODE_INTEGRATION.md`
+
+### Implementação observada em 2026-09-29
+
+O produto não emite evento de início de prompt. Uma mensagem conversacional mais nova
+que o último hook invalida `free`/`ended` antigo e usa a recência do transcript; eventos
+de hook posteriores, `ask` e a janela limitada de `perm` mantêm precedência.

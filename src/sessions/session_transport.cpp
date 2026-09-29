@@ -7,6 +7,13 @@
 #else
 #include "secrets.example.h"
 #endif
+// Older local secrets.h files may not define a secondary network.
+#ifndef WIFI_SSID_2
+#define WIFI_SSID_2 ""
+#endif
+#ifndef WIFI_PASSWORD_2
+#define WIFI_PASSWORD_2 ""
+#endif
 #include "session_manager.h"
 #include <WiFi.h>
 #include <ESPmDNS.h>
@@ -60,7 +67,7 @@ String session_transport_ip_string() {
 
 namespace {
 
-// Duas redes, com a ORDEM como prioridade: a primeira que responder vence. Nao ha
+// Redes em ordem de prioridade: a primeira que responder vence. Nao ha
 // escolha por RSSI de proposito (o operador pediu previsibilidade), e um scan no
 // loop() custaria um pico em maxTransportMs, medido no /diag — o render e FULL.
 struct WifiCredential {
@@ -73,7 +80,7 @@ const WifiCredential WIFI_CREDENTIALS[] = {
     {WIFI_SSID_2, WIFI_PASSWORD_2},
 };
 constexpr uint8_t WIFI_CREDENTIAL_COUNT =
-    sizeof(WIFI_CREDENTIALS) / sizeof(WIFI_CREDENTIALS[0]);
+    WIFI_SSID_2[0] ? sizeof(WIFI_CREDENTIALS) / sizeof(WIFI_CREDENTIALS[0]) : 1;
 
 uint8_t s_wifiCredIndex = 0;    // credencial da tentativa atual
 uint8_t s_failedRetries = 0;    // falhas consecutivas na credencial atual
@@ -430,10 +437,12 @@ void handle_sessions_post() {
         return;
     }
 
-    // Campo aditivo: ausente (daemon legado) mantem o fallback compilado. Clamp para
-    // nao aceitar um mudo absurdo vindo de payload corrompido.
-    const uint32_t declaredSnooze = doc["snooze_minutes"] | 0UL;
-    if (declaredSnooze > 0 && declaredSnooze <= 240UL) s_snoozeMinutes = declaredSnooze;
+    // Campo aditivo: ausente (daemon legado) mantem o fallback compilado. Zero
+    // desativa snooze; valores acima do limite nao sao aceitos.
+    if (doc["snooze_minutes"].is<uint32_t>()) {
+        const uint32_t declaredSnooze = doc["snooze_minutes"].as<uint32_t>();
+        if (declaredSnooze <= 240UL) s_snoozeMinutes = declaredSnooze;
+    }
 
     const uint32_t now = millis();
     int count = 0;
@@ -627,9 +636,8 @@ void session_transport_init() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
 
-    // Um relogio so para as duas redes: ui_dashboard_init() roda DEPOIS daqui, entao
-    // 15s por credencial virariam 30s de tela preta. O orcamento e dividido pelo numero
-    // de credenciais, entao o total nunca passa de WIFI_CONNECT_TIMEOUT_MS.
+    // Um relogio compartilhado limita a tela preta. Uma segunda credencial vazia
+    // nao consome metade do orcamento de boot.
     const uint32_t start = millis();
     const uint32_t perCredential = WIFI_CONNECT_TIMEOUT_MS / WIFI_CREDENTIAL_COUNT;
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {

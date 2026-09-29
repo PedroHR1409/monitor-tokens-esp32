@@ -156,10 +156,12 @@ def _message_totals(messages: list[dict], since_epoch: float | None) -> tuple[in
 
 def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
                            database: Path | None = None, ctx_window: int = 0,
-                           log_path: Path | None = None) -> list:
+                           log_path: Path | None = None,
+                           include_old: bool = False) -> list:
     """Mesma forma do scan_claude_sessions/scan_codex_sessions: um dict por sessao."""
     db = database if database is not None else db_path()
-    sessions = _rows(db, "SELECT * FROM session WHERE time_archived IS NULL "
+    archive_clause = "" if include_old else "WHERE time_archived IS NULL "
+    sessions = _rows(db, "SELECT * FROM session " + archive_clause +
                          "ORDER BY time_updated DESC")
     signals, turn_ends = _part_states_from_rows(
         _part_rows(db, now - timedelta(seconds=STATE_WINDOW_S)))
@@ -179,7 +181,7 @@ def scan_opencode_sessions(now: datetime, token_since: datetime | None = None,
         updated_ms = session.get("time_updated") or session.get("time_created") or 0
         last = datetime.fromtimestamp(updated_ms / 1000.0, tz=timezone.utc)
         age = max((now - last).total_seconds(), 0.0)
-        if age > 24 * 3600:
+        if not include_old and age > 24 * 3600:
             continue               # db cresce para sempre; sem isso o scan degrada
 
         model = {}

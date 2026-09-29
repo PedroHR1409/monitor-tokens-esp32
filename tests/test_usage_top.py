@@ -85,14 +85,15 @@ class CodexTopTests(unittest.TestCase):
             missing = root / "session_index.jsonl"   # indice sem a sessao
             missing.write_text("", encoding="utf-8")
             previous, prev_at = session_meta._cache, session_meta._cache_at
+            previous_dirs = session_meta._directory_caches
             session_meta._cache, session_meta._cache_at = {}, 0.0
+            session_meta._directory_caches = {}
             try:
-                with unittest.mock.patch.object(session_meta, "CODEX_SESSIONS",
-                                                rollouts):
-                    out = usage_top._codex(missing, NOW - timedelta(days=1), TZ,
-                                           NOW, 6, rollouts_dir=rollouts)
+                out = usage_top._codex(missing, NOW - timedelta(days=1), TZ,
+                                       NOW, 6, rollouts_dir=rollouts)
             finally:
                 session_meta._cache, session_meta._cache_at = previous, prev_at
+                session_meta._directory_caches = previous_dirs
                 session_meta._meta_cache.clear()
         self.assertEqual(1500, out["total"])
         self.assertEqual(self.SID[:36], out["sessions"][0]["id"])
@@ -140,6 +141,50 @@ class PayloadTopTests(unittest.TestCase):
             zero = payload["stats"]["usage"]["top"]["d1"]["opencode"]
             self.assertEqual(0, zero["total"])
             self.assertEqual([], zero["sessions"])
+
+    def test_historical_opencode_podium_includes_closed_and_archived_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            at = NOW - timedelta(days=3)
+            db = root / "opencode.db"
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, slug TEXT, "
+                        "directory TEXT, model TEXT, time_created INTEGER, "
+                        "time_updated INTEGER, time_archived INTEGER)")
+            con.execute("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, "
+                        "data TEXT, time_created INTEGER, time_updated INTEGER)")
+            con.execute("INSERT INTO session VALUES (?,?,?,?,?,?,?,?)", (
+                "old-session", "Old project", "old", "", '{"id":"glm"}',
+                int(at.timestamp() * 1000), int(at.timestamp() * 1000),
+                int((at + timedelta(hours=1)).timestamp() * 1000)))
+            con.execute("INSERT INTO message VALUES (?,?,?,?,?)", (
+                "msg-old", "old-session",
+                json.dumps({"role": "assistant", "tokens": {"input": 100,
+                    "output": 20, "reasoning": 0, "cache": {"read": 0, "write": 0}}}),
+                int(at.timestamp() * 1000), int(at.timestamp() * 1000)))
+            con.commit()
+            con.close()
+            out = usage_top._opencode(db, NOW - timedelta(days=7), TZ, NOW, 6)
+        self.assertEqual(120, out["total"])
+        self.assertEqual("old-session", out["sessions"][0]["id"])
+
+    def test_historical_commandcode_podium_includes_sessions_older_than_one_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            at = NOW - timedelta(days=3)
+            session = {"type": "session", "id": "cc-old", "cwd": str(project),
+                       "timestamp": at.isoformat()}
+            message = {"type": "message", "timestamp": at.isoformat(),
+                       "message": {"role": "assistant", "meta": {"messageId": "m1"}},
+                       "usage": {"inputTokens": 1200, "cacheReadTokens": 200,
+                                 "outputTokens": 50}}
+            (project / "cc-old.jsonl").write_text(
+                json.dumps(session) + "\n" + json.dumps(message) + "\n", encoding="utf-8")
+            out = usage_top._commandcode(root, NOW - timedelta(days=7), TZ, NOW, 6)
+        self.assertEqual(1050, out["total"])
+        self.assertEqual("cc-old", out["sessions"][0]["id"])
 
 
 class BuildCachedTests(unittest.TestCase):

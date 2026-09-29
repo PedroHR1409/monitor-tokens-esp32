@@ -169,13 +169,14 @@ def recent_rollouts(directory: Path, window_s: float, now_epoch: float) -> dict:
     return out
 
 
-def _rollout_index() -> dict:
+def _rollout_index(directory: Path | None = None) -> dict:
     """{session_id: caminho do rollout}. So lista nomes de arquivo, nao abre nenhum."""
+    root = Path(directory) if directory is not None else CODEX_SESSIONS
     out = {}
-    if not CODEX_SESSIONS.is_dir():
+    if not root.is_dir():
         return out
     try:
-        for p in CODEX_SESSIONS.rglob("rollout-*.jsonl"):
+        for p in root.rglob("rollout-*.jsonl"):
             # rollout-<timestamp>-<uuid>.jsonl
             stem = p.stem
             uuid = stem.split("-", 2)[-1] if stem.count("-") >= 2 else ""
@@ -194,18 +195,34 @@ def _rollout_index() -> dict:
 
 _cache: dict = {}
 _cache_at: float = 0.0     # time.monotonic() da ultima varredura; 0 = nunca
+_directory_caches: dict[str, tuple[dict, float]] = {}
 _meta_cache: dict = {}
 
 
-def _rollout_for(session_id: str) -> Path | None:
+def _rollout_for(session_id: str, directory: Path | None = None) -> Path | None:
     """Caminho do rollout do id, revarrendo o disco no maximo a cada janela.
 
     Antes, um id sem rollout disparava uma varredura por chamada. Aqui a varredura e
     do INDICE, nao do id: se ela acabou de rodar, o id continua ausente e nao ha o que
     reprocurar. Ver REINDEX_MIN_INTERVAL_S.
     """
-    global _cache, _cache_at
     agora = time.monotonic()
+    if directory is not None:
+        cache_key = str(Path(directory).resolve())
+        indexed = _directory_caches.get(cache_key)
+        if indexed is None:
+            indexed = (_rollout_index(Path(directory)), agora)
+            _directory_caches[cache_key] = indexed
+        paths, indexed_at = indexed
+        path = paths.get(session_id)
+        if path is None and (agora - indexed_at) >= REINDEX_MIN_INTERVAL_S:
+            paths = _rollout_index(Path(directory))
+            indexed_at = agora
+            _directory_caches[cache_key] = (paths, indexed_at)
+            path = paths.get(session_id)
+        return path
+
+    global _cache, _cache_at
     if not _cache and not _cache_at:
         _cache, _cache_at = _rollout_index(), agora
     path = _cache.get(session_id)
@@ -221,7 +238,8 @@ def _codex_vazio() -> dict:
             "ctx_pct": context["pct"], "context": context}
 
 
-def codex_meta(session_id: str, since=None) -> dict:
+def codex_meta(session_id: str, since=None,
+               rollouts_dir: Path | None = None) -> dict:
     """Metadados de uma sessao do Codex a partir do seu rollout.
 
     Devolve {model, cwd, effort, tokens, ctx_pct}. Tudo isso existe no rollout — o que faltava
@@ -237,7 +255,7 @@ def codex_meta(session_id: str, since=None) -> dict:
     `last_token_usage.input_tokens`. Nao precisa inferir nada — e o unico dos dois
     agentes que entrega os dois numeros de forma explicita.
     """
-    path = _rollout_for(session_id)
+    path = _rollout_for(session_id, rollouts_dir)
     if path is None:
         return _codex_vazio()
 
@@ -353,15 +371,16 @@ def _ctx_of(obj: dict) -> int:
             + int(u.get("cache_creation_input_tokens") or 0))
 
 
-def _configured_context_window() -> int:
-    """Limite Claude declarado pelo operador, sem aceitar valores inválidos."""
+def _configured_context_window(configured: int = 0) -> int:
+    """Environment override first, then the validated monitor.toml value."""
     try:
-        return max(int(os.environ.get("MONITOR_CLAUDE_CONTEXT_WINDOW", "") or 0), 0)
+        raw = os.environ.get("MONITOR_CLAUDE_CONTEXT_WINDOW", "").strip()
+        return max(int(raw), 0) if raw else max(int(configured), 0)
     except ValueError:
-        return 0
+        return max(int(configured), 0)
 
 
-def context_usage(objs: list) -> dict:
+def context_usage(objs: list, configured_window: int = 0) -> dict:
     """Contexto Claude com tokens brutos e qualidade explícita do denominador."""
     atual = 0
     pico = 0
@@ -381,4 +400,5 @@ def context_usage(objs: list) -> dict:
     # atual; nesse caso só uma configuração explícita pode produzir uma porcentagem.
     medido = teto_medido if teto_medido >= pico else 0
     return context_measurement(atual, measured_limit=medido,
-                               configured_limit=_configured_context_window())
+                               configured_limit=_configured_context_window(
+                                   configured_window))

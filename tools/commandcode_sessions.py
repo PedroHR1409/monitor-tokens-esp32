@@ -24,7 +24,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent_events import reduce_session_events
+from agent_events import MAX_FUTURE_SKEW_S, reduce_session_events
 from session_hook import load_event_store
 from session_state import (PERM_MARKER_MAX_AGE_S, WORK_MAX_AGE_S, parse_ts,
                            session_display_name, strip_accents)
@@ -204,6 +204,22 @@ def _derive_state(messages: list, snapshot, path: Path, now: datetime) -> tuple:
         # Aguardando aprovacao. Evidencia velha deixa de afirmar (Decisao 1).
         age = _age_s(pending_at, now)
         return ("perm", age) if age <= PERM_MARKER_MAX_AGE_S else ("free", age)
+    # Os hooks nao tem evento para o inicio de um novo prompt. Se o transcript ja
+    # avancou alem do ultimo evento (por exemplo, um Stop antigo seguido de uma
+    # mensagem nova do usuario), a recencia conversacional e a evidencia mais nova.
+    conversational = [o for o in messages if (o.get("message") or {}).get("role")
+                      in ("user", "assistant")]
+    latest = max(conversational,
+                 key=lambda o: parse_ts(o.get("timestamp")) or datetime.min.replace(
+                     tzinfo=timezone.utc), default=None)
+    latest_at = parse_ts(latest.get("timestamp")) if latest else None
+    if (latest_at is not None
+            and (latest_at - now).total_seconds() > MAX_FUTURE_SKEW_S):
+        latest_at = None
+    if (snapshot.last_event_at is not None and latest_at is not None
+            and latest_at > snapshot.last_event_at):
+        age = _age_s(latest_at, now)
+        return ("work" if age <= WORK_MAX_AGE_S else "free"), age
     if snapshot.last_event_at is not None:
         return snapshot.state, float(snapshot.age_s or 0)
     # Sem hook: recencia. Nunca inventa ask/perm (mesma regra do Codex).
@@ -217,14 +233,17 @@ def _derive_state(messages: list, snapshot, path: Path, now: datetime) -> tuple:
 def scan_commandcode_sessions(now: datetime, token_since: datetime | None = None, *,
                               directory: Path | None = None,
                               ctx_window: int = 0,
-                              event_path: Path | None = None) -> list:
+                              event_path: Path | None = None,
+                              include_old: bool = False) -> list:
     """Mesma forma de scan_claude_sessions/scan_codex_sessions: um dict por sessao.
 
     `directory=None` usa projects_dir(); path ausente devolve [] (nunca levanta)."""
     root = Path(directory) if directory is not None else projects_dir()
     try:
         candidates = sorted(root.glob("*/*.jsonl"),
-                            key=lambda p: p.stat().st_mtime, reverse=True)[:SCAN_CANDIDATES]
+                            key=lambda p: p.stat().st_mtime, reverse=True)
+        if not include_old:
+            candidates = candidates[:SCAN_CANDIDATES]
     except OSError:
         return []
     store = load_event_store(event_path or event_store_path())
@@ -243,13 +262,23 @@ def scan_commandcode_sessions(now: datetime, token_since: datetime | None = None
         last_ts = max((parse_ts(o.get("timestamp")) for o in messages
                        if parse_ts(o.get("timestamp")) is not None), default=None)
         age = _age_s(last_ts, now)
-        if age > SESSION_MAX_AGE_S:
+        if not include_old and age > SESSION_MAX_AGE_S:
             continue
 
         snapshot = reduce_session_events(
             session_id, [store[session_id]] if session_id in store else [],
             now, SOURCE_STALE_AFTER_S)
-        if snapshot.ended:
+        latest_conversation_at = max(
+            (parse_ts(o.get("timestamp")) for o in messages
+             if (o.get("message") or {}).get("role") in ("user", "assistant")
+             and parse_ts(o.get("timestamp")) is not None), default=None)
+        if (latest_conversation_at is not None
+                and (latest_conversation_at - now).total_seconds() > MAX_FUTURE_SKEW_S):
+            latest_conversation_at = None
+        transcript_after_event = (snapshot.last_event_at is not None
+                                  and latest_conversation_at is not None
+                                  and latest_conversation_at > snapshot.last_event_at)
+        if snapshot.ended and not include_old and not transcript_after_event:
             continue
         state, state_age = _derive_state(messages, snapshot, path, now)
 

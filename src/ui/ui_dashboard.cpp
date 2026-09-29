@@ -794,7 +794,8 @@ void update_usage_widget() {
     localtime_r(&aT, &a); localtime_r(&bT, &b);
     char line2[48];
     snprintf(line2, sizeof(line2), "%lu%% do pico - semana %02d-%02d: %s",
-             (unsigned long)(peak ? v * 100UL / peak : 0), a.tm_mday, b.tm_mday, wkval);
+             (unsigned long)(peak ? (static_cast<uint64_t>(v) * 100ULL) / peak : 0),
+             a.tm_mday, b.tm_mday, wkval);
     set_text_if(g_uwInspectL2, g_cUwInspect2, sizeof(g_cUwInspect2), line2);
 
     lv_obj_align(g_uwInspect, LV_ALIGN_TOP_MID, 0, y0 + (UW_H - UW_TITLE_H - 56) / 2);
